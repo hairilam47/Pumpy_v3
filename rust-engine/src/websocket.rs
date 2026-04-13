@@ -1,15 +1,21 @@
 // WebSocket monitor for Pump.fun program events
-// Subscribes to Solana program logs and account changes for the Pump.fun program
+// Subscribes to both:
+//   1. logsSubscribe  — receives every transaction that mentions the Pump.fun program
+//   2. programSubscribe — receives every account owned by the Pump.fun program (bonding curves etc.)
 
 use std::sync::Arc;
-use std::str::FromStr;
 use std::time::Duration;
 use tracing::{info, warn, error, debug};
 
-use solana_client::nonblocking::pubsub_client::PubsubClient;
-use solana_client::rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter};
-use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
+
+use solana_client::nonblocking::pubsub_client::PubsubClient;
+use solana_client::rpc_config::{
+    RpcTransactionLogsConfig, RpcTransactionLogsFilter,
+    RpcProgramAccountsConfig, RpcAccountInfoConfig,
+};
+use solana_account_decoder::UiAccountEncoding;
+use solana_sdk::commitment_config::CommitmentConfig;
 
 use crate::rpc::RpcManager;
 use crate::pumpfun::{PumpFunClient, TokenDiscoveredEvent};
@@ -64,17 +70,32 @@ impl WebSocketMonitor {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Connecting to Solana WebSocket: {}", ws_url);
 
+        // Spawn both subscription tasks concurrently; exit when either one ends.
+        let log_future = self.run_logs_subscription(ws_url);
+        let account_future = self.run_program_account_subscription(ws_url);
+
+        tokio::select! {
+            res = log_future => {
+                if let Err(e) = res { warn!("logsSubscribe ended: {}", e); }
+            }
+            res = account_future => {
+                if let Err(e) = res { warn!("programSubscribe ended: {}", e); }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Subscribe to transaction logs for the Pump.fun program (logsSubscribe).
+    /// Fires on every buy/sell/create instruction.
+    async fn run_logs_subscription(
+        &self,
+        ws_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let pubsub = PubsubClient::new(ws_url).await
-            .map_err(|e| format!("PubsubClient connect error: {e}"))?;
+            .map_err(|e| format!("PubsubClient (logs) connect error: {e}"))?;
 
-        info!(
-            "WebSocket connected. Subscribing to Pump.fun program logs: {}",
-            PUMPFUN_PROGRAM_ID
-        );
-
-        // Subscribe to Pump.fun program log messages
-        // This receives events for every create/buy/sell instruction
-        let (mut log_stream, _log_unsub) = pubsub
+        let (mut stream, _unsub) = pubsub
             .logs_subscribe(
                 RpcTransactionLogsFilter::Mentions(vec![PUMPFUN_PROGRAM_ID.to_string()]),
                 RpcTransactionLogsConfig {
@@ -84,45 +105,90 @@ impl WebSocketMonitor {
             .await
             .map_err(|e| format!("logsSubscribe error: {e}"))?;
 
-        info!("Subscribed to Pump.fun program logs");
+        info!("Subscribed to Pump.fun program logs (logsSubscribe)");
 
         loop {
             use futures_util::StreamExt;
-            match tokio::time::timeout(Duration::from_secs(60), log_stream.next()).await {
+            match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
                 Ok(Some(response)) => {
                     let logs = &response.value.logs;
                     let sig = &response.value.signature;
-                    debug!("Got log event for tx: {}", sig);
+                    debug!("Log event for tx: {}", sig);
 
-                    self.metrics.tokens_discovered.inc();
-
-                    // Parse the log lines to identify event type
                     if self.is_token_create(logs) {
                         if let Some(event) = self.parse_create_event(logs, sig) {
-                            info!(
-                                "New token discovered: {} ({}) via tx {}",
-                                event.name, event.symbol, sig
-                            );
+                            info!("New token discovered via logs: {} ({})", event.name, event.symbol);
                             self.metrics.tokens_discovered.inc();
                             let _ = self.pumpfun_client.publish_token_event(event);
                         }
                     } else if self.is_buy_event(logs) {
-                        debug!("Buy event detected in tx {}", sig);
+                        debug!("Buy event in tx {}", sig);
                     } else if self.is_sell_event(logs) {
-                        debug!("Sell event detected in tx {}", sig);
+                        debug!("Sell event in tx {}", sig);
                     }
                 }
-                Ok(None) => {
-                    warn!("WebSocket log stream ended");
-                    break;
-                }
-                Err(_) => {
-                    warn!("WebSocket heartbeat timeout, reconnecting...");
-                    break;
-                }
+                Ok(None) => { warn!("Logs stream ended"); break; }
+                Err(_) => { warn!("Logs stream heartbeat timeout"); break; }
             }
         }
+        Ok(())
+    }
 
+    /// Subscribe to account updates for all accounts owned by the Pump.fun program
+    /// (programSubscribe).  Fires whenever a bonding curve account is created or
+    /// updated — this catches new token launches at the account level.
+    async fn run_program_account_subscription(
+        &self,
+        ws_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let program_pubkey = PUMPFUN_PROGRAM_ID;
+
+        let pubsub = PubsubClient::new(ws_url).await
+            .map_err(|e| format!("PubsubClient (program) connect error: {e}"))?;
+
+        let config = RpcProgramAccountsConfig {
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                commitment: Some(CommitmentConfig::confirmed()),
+                ..Default::default()
+            },
+            filters: None,
+            with_context: Some(true),
+            sort_results: Some(false),
+        };
+
+        let (mut stream, _unsub) = pubsub
+            .program_subscribe(&program_pubkey, Some(config))
+            .await
+            .map_err(|e| format!("programSubscribe error: {e}"))?;
+
+        info!("Subscribed to Pump.fun program accounts (programSubscribe)");
+
+        loop {
+            use futures_util::StreamExt;
+            match tokio::time::timeout(Duration::from_secs(120), stream.next()).await {
+                Ok(Some(response)) => {
+                    let account_key = response.value.pubkey.clone();
+                    debug!("Program account update: {}", account_key);
+                    // Account data changes signal bonding curve activity.
+                    // We emit a lightweight event so downstream strategies can react.
+                    let event = TokenDiscoveredEvent {
+                        mint: account_key.clone(),
+                        name: "Unknown".to_string(),
+                        symbol: "UNK".to_string(),
+                        uri: String::new(),
+                        creator: String::new(),
+                        bonding_curve: account_key,
+                        timestamp: chrono::Utc::now().timestamp(),
+                        virtual_sol_reserves: 30_000_000_000,
+                        virtual_token_reserves: 1_073_000_000_000_000,
+                    };
+                    let _ = self.pumpfun_client.publish_token_event(event);
+                }
+                Ok(None) => { warn!("Program account stream ended"); break; }
+                Err(_) => { warn!("Program account stream heartbeat timeout"); break; }
+            }
+        }
         Ok(())
     }
 

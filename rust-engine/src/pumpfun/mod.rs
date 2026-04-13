@@ -300,7 +300,9 @@ fn load_keypair(path: &PathBuf) -> Result<Keypair, Box<dyn std::error::Error + S
         let bytes: Vec<u8> = serde_json::from_str(&data)?;
         Ok(Keypair::from_bytes(&bytes)?)
     } else {
-        warn!("Keypair file not found at {:?}, generating ephemeral keypair for testing", path);
-        Ok(Keypair::new())
+        Err(format!(
+            "Keypair file not found at {:?}. Set KEYPAIR_PATH to the path of your wallet keypair JSON file.",
+            path
+        ).into())
     }
 }

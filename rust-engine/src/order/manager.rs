@@ -521,6 +521,68 @@ impl OrderManager {
         }
     }
 
+    /// Start consuming TokenDiscoveredEvent events from the PumpFunClient broadcast channel.
+    /// For each event, the strategy layer (Python engine) is notified via the order queue.
+    /// Orders are only submitted automatically when the sniper strategy is active.
+    pub async fn start_token_event_consumer(
+        &self,
+        pumpfun_client: Arc<PumpFunClient>,
+        auto_snipe: bool,
+        snipe_amount_lamports: u64,
+    ) {
+        let mut rx = pumpfun_client.subscribe_token_events();
+        let order_tx = self.order_tx.clone();
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    info!(
+                        "Token event received: mint={} name={} symbol={}",
+                        event.mint, event.name, event.symbol
+                    );
+
+                    if auto_snipe {
+                        // Auto-submit a sniper buy order for newly discovered tokens
+                        let order = super::Order {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            mint: event.mint.clone(),
+                            side: super::OrderSide::Buy,
+                            order_type: super::OrderType::Market,
+                            amount: snipe_amount_lamports,
+                            price: None,
+                            max_cost: None,
+                            min_output: None,
+                            slippage_bps: 300,
+                            strategy: "sniper".to_string(),
+                            status: super::OrderStatus::Pending,
+                            created_at: chrono::Utc::now(),
+                            updated_at: chrono::Utc::now(),
+                            executed_at: None,
+                            signature: None,
+                            error: None,
+                            retry_count: 0,
+                            executed_price: None,
+                            executed_amount: None,
+                            metadata: std::collections::HashMap::new(),
+                        };
+                        if let Err(e) = order_tx.send(order) {
+                            warn!("Failed to queue sniper order for {}: {}", event.mint, e);
+                        } else {
+                            info!("Sniper order queued for new token: {}", event.mint);
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Token event consumer lagged by {} events", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    warn!("Token event broadcast channel closed");
+                    break;
+                }
+            }
+        }
+    }
+
     pub async fn update_positions(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }

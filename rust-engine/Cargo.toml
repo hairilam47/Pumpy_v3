@@ -21,6 +21,7 @@ prost = "0.13"
 # Solana
 solana-client = "2.1"
 solana-sdk = "2.1"
+solana-account-decoder = "2.1"
 
 # HTTP client (for Jito)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

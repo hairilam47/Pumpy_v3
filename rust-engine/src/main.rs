@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start WebSocket monitor
+    // Start WebSocket monitor (logsSubscribe + programSubscribe)
     {
         let ws_monitor = websocket::WebSocketMonitor::new(
             rpc_manager.clone(),
@@ -158,6 +158,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = ws_monitor.run().await {
                 error!("WebSocket monitor error: {}", e);
             }
+        });
+    }
+
+    // Start token event consumer: wires the WebSocket-discovered token events
+    // into the OrderManager execution path.
+    // AUTO_SNIPE=true enables automatic sniper orders on new token launches.
+    {
+        let manager = order_manager.clone();
+        let pf = pumpfun_client.clone();
+        let auto_snipe = std::env::var("AUTO_SNIPE").map(|v| v == "true" || v == "1").unwrap_or(false);
+        let snipe_amount = std::env::var("SNIPE_AMOUNT_SOL")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|sol| (sol * 1_000_000_000.0) as u64)
+            .unwrap_or(50_000_000); // default 0.05 SOL
+        tokio::spawn(async move {
+            info!("Token event consumer started (auto_snipe={}, amount={})", auto_snipe, snipe_amount);
+            manager.start_token_event_consumer(pf, auto_snipe, snipe_amount).await;
         });
     }
 

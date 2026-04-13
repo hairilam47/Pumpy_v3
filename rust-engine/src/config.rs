@@ -106,10 +106,16 @@ impl Config {
             }).collect::<Vec<_>>()
         };
 
+        // Critical values must be supplied via environment — fail fast otherwise
+        let database_url = env::var("DATABASE_URL")
+            .map_err(|_| "DATABASE_URL is required but not set")?;
+        let keypair_path = PathBuf::from(
+            env::var("KEYPAIR_PATH").map_err(|_| "KEYPAIR_PATH is required but not set")?,
+        );
+
         Ok(Self {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost:5432/pumpfun".to_string()),
+            database_url,
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
             grpc_port: env::var("GRPC_PORT")
@@ -120,9 +126,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(9091),
-            keypair_path: PathBuf::from(
-                env::var("KEYPAIR_PATH").unwrap_or_else(|_| "keypair.json".to_string()),
-            ),
+            keypair_path,
             rpc_endpoints,
             jito_bundle_url: env::var("JITO_BUNDLE_URL").ok(),
             execution_workers: env::var("EXECUTION_WORKERS")
