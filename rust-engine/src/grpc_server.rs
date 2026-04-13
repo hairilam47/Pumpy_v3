@@ -196,6 +196,7 @@ impl Bot for BotService {
                         if filter_ids.is_empty() || filter_ids.contains(&event.order_id) {
                             yield OrderUpdate {
                                 order_id: event.order_id,
+                                token_mint: event.token_mint,
                                 status: event.status,
                                 signature: event.signature,
                                 error: event.error,

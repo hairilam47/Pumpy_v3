@@ -61,6 +61,7 @@ pub struct OrderManager {
 #[derive(Debug, Clone)]
 pub struct OrderEvent {
     pub order_id: String,
+    pub token_mint: String,
     pub status: String,
     pub signature: Option<String>,
     pub error: Option<String>,
@@ -392,6 +393,7 @@ impl OrderManager {
     fn emit_event(&self, order: &Order) {
         let event = OrderEvent {
             order_id: order.id.clone(),
+            token_mint: order.mint.clone(),
             status: order.status.to_string(),
             signature: order.signature.clone(),
             error: order.error.clone(),
@@ -785,6 +787,7 @@ impl OrderManagerMinimal {
     fn emit_event_minimal(&self, order: &Order) {
         let event = OrderEvent {
             order_id: order.id.clone(),
+            token_mint: order.mint.clone(),
             status: order.status.to_string(),
             signature: order.signature.clone(),
             error: order.error.clone(),

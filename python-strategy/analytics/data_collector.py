@@ -27,7 +27,10 @@ logger = structlog.get_logger(__name__)
 
 TokenEventCallback = Callable[[TokenMarketData], Awaitable[None]]
 
-NEW_TOKEN_STATUSES = frozenset({"NEW", "DETECTED", "PENDING"})
+# Status values emitted by Rust OrderStatus::to_string() for new/active orders.
+# "Pending" is the first event for any newly submitted order and always carries token_mint.
+# "Executing" is the second event and is also useful for token tracking.
+NEW_TOKEN_STATUSES = frozenset({"Pending", "Executing", "PENDING", "EXECUTING"})
 
 _SOLANA_PUBKEY_MIN_LEN = 32
 _SOLANA_PUBKEY_MAX_LEN = 44

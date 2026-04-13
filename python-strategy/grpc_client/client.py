@@ -220,6 +220,7 @@ class BotGrpcClient:
             async for update in self.stub.StreamOrders(request):
                 yield {
                     "order_id": update.order_id,
+                    "token_mint": update.token_mint,
                     "status": update.status,
                     "signature": update.signature,
                     "error": update.error,

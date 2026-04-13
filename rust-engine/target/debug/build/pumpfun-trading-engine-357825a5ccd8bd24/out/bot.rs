@@ -130,6 +130,8 @@ pub struct OrderUpdate {
     pub executed_price: ::core::option::Option<f64>,
     #[prost(uint64, optional, tag = "7")]
     pub executed_amount: ::core::option::Option<u64>,
+    #[prost(string, tag = "8")]
+    pub token_mint: ::prost::alloc::string::String,
 }
 /// Generated server implementations.
 pub mod bot_server {
