@@ -396,13 +396,26 @@ router.get("/bot/status", async (_req: Request, res: Response) => {
     const pyHealth = await fetchPython("/api/health");
     const pyConnected = !!pyHealth;
 
+    // Derive active strategies from Python strategy list
+    let activeStrategies: string[] = [];
+    if (pyConnected) {
+      try {
+        const pyStrategies = await fetchPython("/api/strategies") as Array<{ name: string; enabled: boolean }> | null;
+        if (Array.isArray(pyStrategies)) {
+          activeStrategies = pyStrategies
+            .filter((s) => s.enabled)
+            .map((s) => s.name);
+        }
+      } catch { /* Python strategies not available */ }
+    }
+
     res.json({
       running: rustConnected || pyConnected,
       rustEngineConnected: rustConnected,
       pythonEngineRunning: pyConnected,
       walletAddress: process.env.WALLET_ADDRESS ?? "",
       solBalance: 0,
-      activeStrategies: ["sniper", "momentum"],
+      activeStrategies,
       environment: process.env.NODE_ENV ?? "development",
       uptime: process.uptime(),
     });

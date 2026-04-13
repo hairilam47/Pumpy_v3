@@ -1,8 +1,8 @@
-import { useGetPortfolio, useGetBotStatus, useGetMetrics } from "@workspace/api-client-react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useListTrades, getGetPortfolioQueryOptions, getGetBotStatusQueryOptions, getGetMetricsQueryOptions } from "@workspace/api-client-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import {
-  Activity, TrendingUp, TrendingDown, Wallet, Shield,
+  Activity, TrendingUp, TrendingDown, Wallet, Shield, Layers,
   Play, Square, Loader2,
 } from "lucide-react";
 import { cn, formatSol, formatPnl, formatPercent, shortenAddress } from "@/lib/utils";
@@ -49,19 +49,23 @@ async function botControl(action: "start" | "stop") {
   return res.json();
 }
 
-const MOCK_PNL_DATA = Array.from({ length: 24 }, (_, i) => ({
-  time: `${String(i).padStart(2, "0")}:00`,
-  pnl: (Math.sin(i / 4) * 0.3 + Math.random() * 0.1 - 0.03) * (1 + i * 0.02),
-}));
-
 export default function DashboardPage() {
   const qc = useQueryClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: portfolio } = useGetPortfolio({ query: { refetchInterval: 5_000 } as any });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: status } = useGetBotStatus({ query: { refetchInterval: 5_000 } as any });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: metrics } = useGetMetrics({ query: { refetchInterval: 10_000 } as any });
+
+  const { data: portfolio } = useQuery({
+    ...getGetPortfolioQueryOptions(),
+    refetchInterval: 5_000,
+  });
+  const { data: status } = useQuery({
+    ...getGetBotStatusQueryOptions(),
+    refetchInterval: 5_000,
+  });
+  const { data: metrics } = useQuery({
+    ...getGetMetricsQueryOptions(),
+    refetchInterval: 10_000,
+  });
+
+  const { data: tradesData } = useListTrades({ limit: 200 });
 
   const pnl = portfolio?.dailyPnlSol ?? 0;
   const totalPnl = portfolio?.totalPnlSol ?? 0;
@@ -77,6 +81,25 @@ export default function DashboardPage() {
   });
 
   const ctrlPending = startBot.isPending || stopBot.isPending;
+
+  // Build real hourly PnL chart from trades data
+  const pnlChartData = (() => {
+    const hourMap: Record<string, number> = {};
+    const trades = tradesData ?? [];
+    for (const t of trades) {
+      if (!t.createdAt) continue;
+      const hour = `${String(new Date(t.createdAt).getHours()).padStart(2, "0")}:00`;
+      hourMap[hour] = (hourMap[hour] ?? 0) + (t.pnlSol ?? 0);
+    }
+    const hours = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
+    let cumulative = 0;
+    return hours.map((h) => {
+      cumulative += hourMap[h] ?? 0;
+      return { time: h, pnl: cumulative };
+    });
+  })();
+
+  const activeStrategies = status?.activeStrategies ?? [];
 
   return (
     <div className="space-y-6">
@@ -96,11 +119,10 @@ export default function DashboardPage() {
             <span className="uppercase tracking-wider">{status.environment}</span>
           </div>
         )}
-        {/* Active strategies */}
-        {status?.activeStrategies && (status.activeStrategies as string[]).length > 0 && (
+        {activeStrategies.length > 0 && (
           <div className="flex items-center gap-1 text-xs">
             <span className="text-muted-foreground">Active:</span>
-            {(status.activeStrategies as string[]).map((s) => (
+            {activeStrategies.map((s) => (
               <span key={s} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary capitalize">{s}</span>
             ))}
           </div>
@@ -129,12 +151,24 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Portfolio metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {/* Portfolio metrics — all 6 required fields */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard
-          label="Wallet Balance"
+          label="Total Value"
+          value={formatSol(portfolio?.totalValueSol ?? 0)}
+          icon={Layers}
+          trend="neutral"
+        />
+        <MetricCard
+          label="Cash Balance"
           value={formatSol(portfolio?.cashBalanceSol ?? 0)}
           icon={Wallet}
+          trend="neutral"
+        />
+        <MetricCard
+          label="Positions Value"
+          value={formatSol(portfolio?.positionsValueSol ?? 0)}
+          icon={Activity}
           trend="neutral"
         />
         <MetricCard
@@ -163,7 +197,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold">24h PnL</h2>
+            <h2 className="text-sm font-semibold">24h Cumulative PnL</h2>
             <span className={cn("text-xs font-medium tabular-nums",
               pnl >= 0 ? "text-green-400" : "text-red-400"
             )}>
@@ -171,7 +205,7 @@ export default function DashboardPage() {
             </span>
           </div>
           <ResponsiveContainer width="100%" height={160}>
-            <AreaChart data={MOCK_PNL_DATA}>
+            <AreaChart data={pnlChartData}>
               <defs>
                 <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#22c55e" stopOpacity={0.2} />
