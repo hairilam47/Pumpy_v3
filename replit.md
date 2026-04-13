@@ -36,6 +36,19 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 - `cargo check` (in rust-engine/) — typecheck Rust
 - `python main.py` (in python-strategy/) — run Python strategy engine
 
+## Python Strategy Engine (`python-strategy/`)
+
+- `main.py` — FastAPI entry point; lifespan hook starts/stops StrategyEngine
+- `strategy_engine.py` — orchestrates strategies, data collector, Prometheus (port 9092)
+- `config.py` — all settings via pydantic-settings (env vars)
+- `grpc_client/client.py` — async gRPC client connecting to Rust engine port 50051
+- `grpc_client/bot_pb2*.py` — generated proto stubs (fixed import for package context)
+- `analytics/data_collector.py` — PumpFunDataCollector: streams StreamOrders gRPC → token events
+- `ml/signal_generator.py` — MLSignalGenerator: rule-based + scikit-learn RF model scoring
+- `strategies/sniper.py` — PumpFunSniper: early bonding curve sniping strategy
+- `strategies/momentum.py` — MomentumTrader: volume/price momentum strategy
+- `api/routes.py` — FastAPI routes: /health, /metrics, /strategies, /portfolio, /orders, /tokens, /strategy/activate, /strategy/config
+
 ## Key Files
 
 - `rust-engine/src/main.rs` — Rust engine entry point

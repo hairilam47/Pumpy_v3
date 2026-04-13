@@ -120,3 +120,36 @@ async def get_tracked_tokens(engine=Depends(get_engine)):
             "bonding_curve_progress": token.bonding_curve_progress,
         }
     return tokens
+
+
+@router.get("/metrics")
+async def get_metrics(engine=Depends(get_engine)):
+    """
+    Aggregate performance metrics: win rate, PnL, open positions, trade count.
+    Consumed by the dashboard via the Express API server.
+    """
+    return engine.get_metrics()
+
+
+@router.post("/strategy/activate")
+async def activate_strategy(body: StrategyConfigUpdate, engine=Depends(get_engine)):
+    """Activate or deactivate a strategy by name."""
+    for strategy in engine.strategies:
+        if strategy.name == body.strategy_name:
+            if body.enabled is not None:
+                strategy.enabled = body.enabled
+            return {"success": True, "strategy": strategy.get_stats()}
+    raise HTTPException(status_code=404, detail=f"Strategy '{body.strategy_name}' not found")
+
+
+@router.post("/strategy/config")
+async def update_strategy_config(body: StrategyConfigUpdate, engine=Depends(get_engine)):
+    """Update strategy configuration parameters."""
+    for strategy in engine.strategies:
+        if strategy.name == body.strategy_name:
+            if body.enabled is not None:
+                strategy.enabled = body.enabled
+            if body.buy_amount_sol is not None and hasattr(strategy, "buy_amount_sol"):
+                strategy.buy_amount_sol = body.buy_amount_sol
+            return {"success": True, "strategy": strategy.get_stats()}
+    raise HTTPException(status_code=404, detail=f"Strategy '{body.strategy_name}' not found")

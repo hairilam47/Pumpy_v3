@@ -20,6 +20,10 @@ author = "agent"
 task = "workflow.run"
 args = "rust-engine: Trading Engine"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "python-strategy: Strategy Engine"
+
 [[workflows.workflow]]
 name = "rust-engine: Trading Engine"
 author = "agent"
@@ -30,6 +34,17 @@ args = "cd rust-engine && cargo run --bin trading-engine 2>&1"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow]]
+name = "python-strategy: Strategy Engine"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd python-strategy && python main.py"
 
 [agent]
 stack = "PNPM_WORKSPACE"
@@ -46,6 +61,10 @@ externalPort = 8080
 [[ports]]
 localPort = 8081
 externalPort = 80
+
+[[ports]]
+localPort = 9092
+externalPort = 3001
 
 [[ports]]
 localPort = 23183

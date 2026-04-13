@@ -33,17 +33,25 @@ class BotGrpcClient:
         )
 
         try:
-            # Import generated proto code
-            import grpc_client.bot_pb2 as bot_pb2
-            import grpc_client.bot_pb2_grpc as bot_pb2_grpc
+            # Import generated proto stubs — try relative first, then absolute
+            try:
+                from grpc_client import bot_pb2, bot_pb2_grpc
+            except ImportError:
+                from . import bot_pb2, bot_pb2_grpc  # type: ignore[no-redef]
 
             self.stub = bot_pb2_grpc.BotStub(self.channel)
             self.bot_pb2 = bot_pb2
 
-            # Test connectivity
-            await self.channel.channel_ready()
-            self._connected = True
-            logger.info("Connected to Rust engine", target=target)
+            # Test connectivity with a short timeout so startup isn't blocked
+            try:
+                await asyncio.wait_for(self.channel.channel_ready(), timeout=3.0)
+                self._connected = True
+                logger.info("Connected to Rust engine", target=target)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Rust engine not reachable yet (standalone mode)", target=target
+                )
+                self._connected = False
         except Exception as e:
             logger.warning("gRPC connection failed (running in standalone mode)", error=str(e))
             self._connected = False
