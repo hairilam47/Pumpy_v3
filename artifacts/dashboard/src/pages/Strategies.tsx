@@ -76,7 +76,7 @@ export default function StrategiesPage() {
         strategyName: name,
         data: { enabled: !currentEnabled },
       });
-      qc.invalidateQueries({ queryKey: ["listStrategies"] });
+      qc.invalidateQueries({ queryKey: ["/api/bot/strategies"] });
     } catch (e) {
       console.error(e);
     }
@@ -113,7 +113,7 @@ export default function StrategiesPage() {
           minLiquiditySol: isNaN(minLiquiditySol) ? undefined : minLiquiditySol,
         },
       });
-      qc.invalidateQueries({ queryKey: ["listStrategies"] });
+      qc.invalidateQueries({ queryKey: ["/api/bot/strategies"] });
       setEditing(null);
     } catch (e: unknown) {
       setSaveError(e instanceof Error ? e.message : "Save failed");

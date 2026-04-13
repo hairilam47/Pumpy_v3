@@ -442,11 +442,8 @@ router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
     const jitoEnabled = !!process.env.JITO_BUNDLE_URL;
 
     if (pyMetrics) {
-      const submitted = Number(pyMetrics.jitoLanded ?? pyMetrics.bundles_submitted ?? 0);
-      const landed = Number(pyMetrics.jitoLanded ?? pyMetrics.bundles_landed ?? 0);
-      // jito_landed is bundles that successfully landed; submitted ≥ landed
-      const bundlesSubmitted = Number(pyMetrics.bundles_submitted ?? pyMetrics.jitoLanded ?? 0);
-      const bundlesLanded = Number(pyMetrics.bundles_landed ?? pyMetrics.jitoLanded ?? 0);
+      const bundlesSubmitted = Number(pyMetrics.bundles_submitted ?? 0);
+      const bundlesLanded = Number(pyMetrics.bundles_landed ?? 0);
       const landedRate = bundlesSubmitted > 0 ? (bundlesLanded / bundlesSubmitted) * 100 : 0;
       const mevSavedSol = Number(pyMetrics.mev_saved_sol ?? pyMetrics.mevSavedSol ?? 0);
 
@@ -476,20 +473,30 @@ router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
 
 // ─── Bot Control ──────────────────────────────────────────────────────────────
 
+async function fetchStrategyNames(): Promise<string[]> {
+  const pyStrategies = await fetchPython("/api/strategies") as Array<{ name: string }> | null;
+  return Array.isArray(pyStrategies) ? pyStrategies.map((s) => s.name) : ["sniper", "momentum"];
+}
+
+async function setAllStrategies(enabled: boolean): Promise<number> {
+  const names = await fetchStrategyNames();
+  let succeeded = 0;
+  for (const name of names) {
+    try {
+      const result = await fetchPython("/api/strategy/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_name: name, enabled }),
+      });
+      if (result !== null) succeeded++;
+    } catch { /* individual strategy failed — continue */ }
+  }
+  return succeeded;
+}
+
 router.post("/bot/start", async (_req: Request, res: Response) => {
   try {
-    const strategies = ["sniper", "momentum"];
-    let succeeded = 0;
-    for (const name of strategies) {
-      try {
-        const result = await fetchPython("/api/strategy/activate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_name: name, enabled: true }),
-        });
-        if (result !== null) succeeded++;
-      } catch { /* strategy failed — continue */ }
-    }
+    const succeeded = await setAllStrategies(true);
     res.json({
       success: succeeded > 0,
       message: succeeded > 0
@@ -503,18 +510,7 @@ router.post("/bot/start", async (_req: Request, res: Response) => {
 
 router.post("/bot/stop", async (_req: Request, res: Response) => {
   try {
-    const strategies = ["sniper", "momentum"];
-    let succeeded = 0;
-    for (const name of strategies) {
-      try {
-        const result = await fetchPython("/api/strategy/activate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_name: name, enabled: false }),
-        });
-        if (result !== null) succeeded++;
-      } catch { /* strategy failed — continue */ }
-    }
+    const succeeded = await setAllStrategies(false);
     res.json({
       success: succeeded > 0,
       message: succeeded > 0
