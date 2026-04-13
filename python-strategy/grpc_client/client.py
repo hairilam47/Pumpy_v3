@@ -15,10 +15,23 @@ class BotGrpcClient:
     def __init__(self):
         self.channel: Optional[grpc.aio.Channel] = None
         self.stub = None
+        self.bot_pb2 = None
         self._connected = False
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._stopped = False
+
+        # Load proto stubs at import time (not during connect)
+        try:
+            from grpc_client import bot_pb2, bot_pb2_grpc
+        except ImportError:
+            from . import bot_pb2, bot_pb2_grpc  # type: ignore[no-redef]
+
+        self._bot_pb2 = bot_pb2
+        self._bot_pb2_grpc = bot_pb2_grpc
 
     async def connect(self):
-        """Connect to the Rust gRPC server."""
+        """Open gRPC channel and attempt initial connection; start reconnect loop."""
+        self._stopped = False
         target = f"{settings.grpc_host}:{settings.grpc_port}"
         logger.info("Connecting to Rust engine", target=target)
 
@@ -31,33 +44,49 @@ class BotGrpcClient:
                 ("grpc.http2.max_pings_without_data", 0),
             ],
         )
+        self.stub = self._bot_pb2_grpc.BotStub(self.channel)
+        self.bot_pb2 = self._bot_pb2
 
+        # Non-blocking: try initial probe; start reconnect loop regardless
+        await self._probe_connection(target)
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop(target))
+
+    async def _probe_connection(self, target: str):
+        """Check whether the Rust engine is reachable right now."""
         try:
-            # Import generated proto stubs — try relative first, then absolute
-            try:
-                from grpc_client import bot_pb2, bot_pb2_grpc
-            except ImportError:
-                from . import bot_pb2, bot_pb2_grpc  # type: ignore[no-redef]
-
-            self.stub = bot_pb2_grpc.BotStub(self.channel)
-            self.bot_pb2 = bot_pb2
-
-            # Test connectivity with a short timeout so startup isn't blocked
-            try:
-                await asyncio.wait_for(self.channel.channel_ready(), timeout=3.0)
+            await asyncio.wait_for(self.channel.channel_ready(), timeout=3.0)
+            if not self._connected:
                 self._connected = True
                 logger.info("Connected to Rust engine", target=target)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Rust engine not reachable yet (standalone mode)", target=target
-                )
+        except (asyncio.TimeoutError, Exception):
+            if self._connected:
                 self._connected = False
-        except Exception as e:
-            logger.warning("gRPC connection failed (running in standalone mode)", error=str(e))
-            self._connected = False
+                logger.warning("Lost connection to Rust engine", target=target)
+            else:
+                logger.info("Rust engine not reachable yet (standalone mode)", target=target)
+
+    async def _reconnect_loop(self, target: str):
+        """Background task: periodically re-probe until connected or stopped."""
+        delay = 5.0
+        while not self._stopped:
+            await asyncio.sleep(delay)
+            if self._stopped:
+                break
+            if not self._connected:
+                await self._probe_connection(target)
+                delay = min(delay * 1.5, 60.0)
+            else:
+                delay = 5.0
 
     async def disconnect(self):
-        """Close the gRPC channel."""
+        """Close the gRPC channel and stop the reconnect loop."""
+        self._stopped = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
         if self.channel:
             await self.channel.close()
             self._connected = False
