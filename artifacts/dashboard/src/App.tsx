@@ -1,0 +1,130 @@
+import { Switch, Route, Router as WouterRouter, Link, useLocation } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import NotFound from "@/pages/not-found";
+import DashboardPage from "@/pages/Dashboard";
+import StrategiesPage from "@/pages/Strategies";
+import TokensPage from "@/pages/Tokens";
+import TradesPage from "@/pages/Trades";
+import { cn } from "@/lib/utils";
+import {
+  LayoutDashboard, Bot, Coins, History,
+  Activity, Github, ExternalLink
+} from "lucide-react";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 3000,
+    },
+  },
+});
+
+const NAV_LINKS = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/strategies", label: "Strategies", icon: Bot },
+  { href: "/tokens", label: "Tokens", icon: Coins },
+  { href: "/trades", label: "Trades", icon: History },
+];
+
+function Sidebar() {
+  const [location] = useLocation();
+  return (
+    <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-sidebar-border flex flex-col min-h-screen">
+      {/* Logo */}
+      <div className="px-5 py-5 border-b border-sidebar-border">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
+            <Activity className="w-4 h-4 text-primary-foreground" />
+          </div>
+          <div>
+            <div className="text-sm font-bold text-sidebar-foreground leading-none">PumpyPumpy</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Trading Bot</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Nav links */}
+      <nav className="flex-1 p-3 space-y-1">
+        {NAV_LINKS.map(({ href, label, icon: Icon }) => {
+          const isActive = href === "/" ? location === "/" : location.startsWith(href);
+          return (
+            <Link
+              key={href}
+              href={href}
+              className={cn(
+                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors",
+                isActive
+                  ? "bg-primary/10 text-primary font-medium"
+                  : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              )}
+            >
+              <Icon className="w-4 h-4 flex-shrink-0" />
+              {label}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Footer */}
+      <div className="p-3 border-t border-sidebar-border space-y-1">
+        <a
+          href="https://github.com/hairilam47/PumpyPumpyFunBotTrade"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-muted-foreground hover:text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
+        >
+          <Github className="w-3.5 h-3.5" />
+          GitHub Repo
+          <ExternalLink className="w-3 h-3 ml-auto" />
+        </a>
+        <div className="px-3 py-1">
+          <div className="text-xs text-muted-foreground">Pump.fun Program</div>
+          <div className="text-xs font-mono text-muted-foreground/70 truncate">6EF8rre...F6P</div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen bg-background">
+      <Sidebar />
+      <main className="flex-1 overflow-auto">
+        <div className="max-w-6xl mx-auto p-6">
+          {children}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function Router() {
+  return (
+    <Layout>
+      <Switch>
+        <Route path="/" component={DashboardPage} />
+        <Route path="/strategies" component={StrategiesPage} />
+        <Route path="/tokens" component={TokensPage} />
+        <Route path="/trades" component={TradesPage} />
+        <Route component={NotFound} />
+      </Switch>
+    </Layout>
+  );
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+          <Router />
+        </WouterRouter>
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}

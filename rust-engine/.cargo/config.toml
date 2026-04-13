@@ -1,0 +1,4 @@
+[env]
+OPENSSL_DIR = "/nix/store/0225zs9jl9s2y3ai1arbg0h9z7z4bmfi-openssl-3.4.1-dev"
+OPENSSL_LIB_DIR = "/nix/store/5xmcl9wr18g6ym3dh3363hv8hp6jyxqd-openssl-3.4.1/lib"
+OPENSSL_INCLUDE_DIR = "/nix/store/0225zs9jl9s2y3ai1arbg0h9z7z4bmfi-openssl-3.4.1-dev/include"

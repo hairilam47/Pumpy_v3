@@ -1,0 +1,2 @@
+cargo:rerun-if-changed=proto/bot.proto
+cargo:rerun-if-changed=proto

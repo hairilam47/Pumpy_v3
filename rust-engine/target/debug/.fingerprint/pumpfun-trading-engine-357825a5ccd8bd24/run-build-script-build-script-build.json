@@ -1,0 +1,1 @@
+{"rustc":11410426090777951712,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[3833487183315024838,"build_script_build",false,1791980625290661034]],"local":[{"RerunIfChanged":{"output":"debug/build/pumpfun-trading-engine-357825a5ccd8bd24/output","paths":["proto/bot.proto","proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

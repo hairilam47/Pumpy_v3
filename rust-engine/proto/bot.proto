@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package bot;
+
+service Bot {
+    rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
+    rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+    rpc GetOrderStatus(GetOrderStatusRequest) returns (OrderStatusResponse);
+    rpc GetTokenInfo(GetTokenInfoRequest) returns (TokenInfoResponse);
+    rpc GetPortfolioSummary(Empty) returns (PortfolioSummaryResponse);
+    rpc StreamOrders(StreamOrdersRequest) returns (stream OrderUpdate);
+}
+
+message Empty {}
+
+message SubmitOrderRequest {
+    string token_mint = 1;
+    string order_type = 2;
+    string side = 3;
+    uint64 amount = 4;
+    optional double price = 5;
+    optional uint64 max_sol_cost = 6;
+    optional uint64 min_sol_output = 7;
+    uint64 slippage_bps = 8;
+    string strategy_name = 9;
+    map<string, string> metadata = 10;
+}
+
+message SubmitOrderResponse {
+    string order_id = 1;
+    bool success = 2;
+    string message = 3;
+}
+
+message CancelOrderRequest {
+    string order_id = 1;
+}
+
+message CancelOrderResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetOrderStatusRequest {
+    string order_id = 1;
+}
+
+message OrderStatusResponse {
+    string order_id = 1;
+    string status = 2;
+    string signature = 3;
+    string error = 4;
+    optional string executed_at = 5;
+}
+
+message GetTokenInfoRequest {
+    string token_mint = 1;
+}
+
+message TokenInfoResponse {
+    string mint = 1;
+    string name = 2;
+    string symbol = 3;
+    double price = 4;
+    double liquidity_sol = 5;
+    double market_cap_sol = 6;
+    double volume_24h_sol = 7;
+    uint32 holder_count = 8;
+    double bonding_curve_progress = 9;
+}
+
+message PortfolioSummaryResponse {
+    double total_value_sol = 1;
+    double cash_balance_sol = 2;
+    double positions_value_sol = 3;
+    double daily_pnl_sol = 4;
+    double total_pnl_sol = 5;
+    uint32 open_positions_count = 6;
+    double win_rate = 7;
+}
+
+message StreamOrdersRequest {
+    repeated string order_ids = 1;
+}
+
+message OrderUpdate {
+    string order_id = 1;
+    string status = 2;
+    optional string signature = 3;
+    optional string error = 4;
+    optional string executed_at = 5;
+    optional double executed_price = 6;
+    optional uint64 executed_amount = 7;
+}

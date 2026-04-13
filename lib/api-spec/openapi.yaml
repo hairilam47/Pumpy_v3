@@ -1,22 +1,22 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: PumpFun Trading Bot API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Trading bot operations
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +24,200 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [bot]
+      summary: Get portfolio summary
+      responses:
+        "200":
+          description: Portfolio summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortfolioSummary"
+
+  /bot/trades:
+    get:
+      operationId: listTrades
+      tags: [bot]
+      summary: List recent trades
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+        - in: query
+          name: strategy
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trade"
+
+  /bot/orders:
+    post:
+      operationId: submitOrder
+      tags: [bot]
+      summary: Submit a manual order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitOrderBody"
+      responses:
+        "200":
+          description: Order submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderResult"
+
+  /bot/orders/{orderId}:
+    get:
+      operationId: getOrder
+      tags: [bot]
+      summary: Get order status
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Order status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+    delete:
+      operationId: cancelOrder
+      tags: [bot]
+      summary: Cancel an order
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cancellation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResult"
+
+  /bot/strategies:
+    get:
+      operationId: listStrategies
+      tags: [bot]
+      summary: List all strategies with stats
+      responses:
+        "200":
+          description: Strategy list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StrategyStats"
+
+  /bot/strategies/{strategyName}:
+    patch:
+      operationId: updateStrategy
+      tags: [bot]
+      summary: Enable/disable or configure a strategy
+      parameters:
+        - in: path
+          name: strategyName
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateStrategyBody"
+      responses:
+        "200":
+          description: Updated strategy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StrategyStats"
+
+  /bot/tokens:
+    get:
+      operationId: listTokens
+      tags: [bot]
+      summary: List tracked tokens
+      responses:
+        "200":
+          description: Tracked tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TokenInfo"
+
+  /bot/tokens/{mint}:
+    get:
+      operationId: getToken
+      tags: [bot]
+      summary: Get token info
+      parameters:
+        - in: path
+          name: mint
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Token info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenInfo"
+
+  /bot/metrics:
+    get:
+      operationId: getMetrics
+      tags: [bot]
+      summary: Get bot performance metrics
+      responses:
+        "200":
+          description: Performance metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotMetrics"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get current bot status (running, engine health, connections)
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +225,220 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    PortfolioSummary:
+      type: object
+      properties:
+        totalValueSol:
+          type: number
+        cashBalanceSol:
+          type: number
+        positionsValueSol:
+          type: number
+        dailyPnlSol:
+          type: number
+        totalPnlSol:
+          type: number
+        openPositionsCount:
+          type: integer
+        winRate:
+          type: number
+      required: [totalValueSol, cashBalanceSol, positionsValueSol, dailyPnlSol, totalPnlSol, openPositionsCount, winRate]
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: string
+        mint:
+          type: string
+        tokenName:
+          type: string
+        tokenSymbol:
+          type: string
+        side:
+          type: string
+          enum: [BUY, SELL]
+        amountSol:
+          type: number
+        price:
+          type: number
+        status:
+          type: string
+        strategy:
+          type: string
+        signature:
+          type: string
+        pnlSol:
+          type: number
+        createdAt:
+          type: string
+        executedAt:
+          type: string
+      required: [id, mint, side, amountSol, status, strategy, createdAt]
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+        mint:
+          type: string
+        side:
+          type: string
+        amount:
+          type: integer
+        status:
+          type: string
+        signature:
+          type: string
+        error:
+          type: string
+        createdAt:
+          type: string
+        executedAt:
+          type: string
+      required: [id, mint, side, amount, status, createdAt]
+
+    SubmitOrderBody:
+      type: object
+      properties:
+        tokenMint:
+          type: string
+        side:
+          type: string
+          enum: [BUY, SELL]
+        amountSol:
+          type: number
+        orderType:
+          type: string
+          enum: [MARKET, LIMIT]
+          default: MARKET
+        slippageBps:
+          type: integer
+          default: 100
+        strategyName:
+          type: string
+          default: manual
+      required: [tokenMint, side, amountSol]
+
+    OrderResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        orderId:
+          type: string
+        message:
+          type: string
+      required: [success, orderId, message]
+
+    CancelResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required: [success, message]
+
+    StrategyStats:
+      type: object
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        tradesExecuted:
+          type: integer
+        tradesWon:
+          type: integer
+        winRate:
+          type: number
+        totalPnlSol:
+          type: number
+        buyAmountSol:
+          type: number
+      required: [name, enabled, tradesExecuted, tradesWon, winRate, totalPnlSol]
+
+    UpdateStrategyBody:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        buyAmountSol:
+          type: number
+        slippageBps:
+          type: integer
+
+    TokenInfo:
+      type: object
+      properties:
+        mint:
+          type: string
+        name:
+          type: string
+        symbol:
+          type: string
+        price:
+          type: number
+        liquiditySol:
+          type: number
+        marketCapSol:
+          type: number
+        volume24hSol:
+          type: number
+        holderCount:
+          type: integer
+        bondingCurveProgress:
+          type: number
+      required: [mint, price, liquiditySol, marketCapSol, bondingCurveProgress]
+
+    BotMetrics:
+      type: object
+      properties:
+        ordersSubmitted:
+          type: integer
+        ordersExecuted:
+          type: integer
+        ordersFailed:
+          type: integer
+        ordersPending:
+          type: integer
+        jitoLanded:
+          type: integer
+        sandwichAttacks:
+          type: integer
+        avgExecutionMs:
+          type: number
+        rpcErrorRate:
+          type: number
+        tokensDiscovered:
+          type: integer
+        tokensSniped:
+          type: integer
+      required: [ordersSubmitted, ordersExecuted, ordersFailed, ordersPending]
+
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        rustEngineConnected:
+          type: boolean
+        pythonEngineRunning:
+          type: boolean
+        walletAddress:
+          type: string
+        solBalance:
+          type: number
+        activeStrategies:
+          type: array
+          items:
+            type: string
+        environment:
+          type: string
+        uptime:
+          type: integer
+      required: [running, rustEngineConnected, pythonEngineRunning]
