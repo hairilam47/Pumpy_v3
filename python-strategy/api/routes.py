@@ -27,6 +27,11 @@ class StrategyConfigUpdate(BaseModel):
     strategy_name: str
     enabled: Optional[bool] = None
     buy_amount_sol: Optional[float] = None
+    slippage_bps: Optional[int] = None
+    take_profit_pct: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    trailing_stop_pct: Optional[float] = None
+    min_liquidity_sol: Optional[float] = None
 
 
 @router.get("/health")
@@ -61,6 +66,16 @@ async def update_strategy(
             if update.buy_amount_sol is not None:
                 if hasattr(strategy, "buy_amount_sol"):
                     strategy.buy_amount_sol = update.buy_amount_sol
+            if update.slippage_bps is not None and hasattr(strategy, "slippage_bps"):
+                strategy.slippage_bps = update.slippage_bps
+            if update.take_profit_pct is not None and hasattr(strategy, "take_profit_pct"):
+                strategy.take_profit_pct = update.take_profit_pct
+            if update.stop_loss_pct is not None and hasattr(strategy, "stop_loss_pct"):
+                strategy.stop_loss_pct = update.stop_loss_pct
+            if update.trailing_stop_pct is not None and hasattr(strategy, "trailing_stop_pct"):
+                strategy.trailing_stop_pct = update.trailing_stop_pct
+            if update.min_liquidity_sol is not None and hasattr(strategy, "min_liquidity_sol"):
+                strategy.min_liquidity_sol = update.min_liquidity_sol
             return {"success": True, "strategy": strategy.get_stats()}
     raise HTTPException(status_code=404, detail=f"Strategy '{strategy_name}' not found")
 

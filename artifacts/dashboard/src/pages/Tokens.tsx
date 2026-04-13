@@ -18,9 +18,30 @@ function BondingCurveBar({ progress }: { progress: number }) {
   );
 }
 
+function ActionBadge({ action }: { action?: string }) {
+  if (!action) return <span className="text-muted-foreground">—</span>;
+  const colorClass = action === "SNIPED"
+    ? "bg-green-500/10 text-green-400"
+    : action === "WATCHED"
+    ? "bg-amber-500/10 text-amber-400"
+    : "bg-secondary text-muted-foreground";
+  return (
+    <span className={cn("px-1.5 py-0.5 rounded text-xs font-medium", colorClass)}>
+      {action}
+    </span>
+  );
+}
+
+function formatAge(detectedAt?: string): string {
+  if (!detectedAt) return "—";
+  const ms = Date.now() - new Date(detectedAt).getTime();
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+  return `${Math.floor(ms / 3_600_000)}h ago`;
+}
+
 export default function TokensPage() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: tokens, isLoading } = useListTokens() as { data: any[] | undefined; isLoading: boolean };
+  const { data: tokens, isLoading } = useListTokens();
 
   const tokenList = tokens ?? [];
 
@@ -45,17 +66,19 @@ export default function TokensPage() {
           <p className="text-muted-foreground text-xs mt-1">Tokens appear here as the bot discovers new launches.</p>
         </div>
       ) : (
-        <div className="bg-card border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-xs">
+        <div className="bg-card border border-border rounded-lg overflow-hidden overflow-x-auto">
+          <table className="w-full text-xs min-w-max">
             <thead>
               <tr className="text-muted-foreground border-b border-border bg-secondary/20">
                 <th className="text-left py-3 px-4 font-medium">Token</th>
+                <th className="text-right py-3 px-4 font-medium">Detected</th>
                 <th className="text-right py-3 px-4 font-medium">Price (SOL)</th>
                 <th className="text-right py-3 px-4 font-medium">Market Cap</th>
                 <th className="text-right py-3 px-4 font-medium">Liquidity</th>
                 <th className="text-right py-3 px-4 font-medium">24h Volume</th>
                 <th className="text-right py-3 px-4 font-medium">Holders</th>
                 <th className="text-right py-3 px-4 font-medium">ML Score</th>
+                <th className="text-center py-3 px-4 font-medium">Action Taken</th>
                 <th className="py-3 px-4 font-medium">BC Progress</th>
               </tr>
             </thead>
@@ -64,11 +87,14 @@ export default function TokensPage() {
                 <tr key={token.mint} className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
                   <td className="py-3 px-4">
                     <div className="flex flex-col">
-                      <span className="font-semibold text-foreground">{token.symbol || "—"}</span>
+                      <span className="font-semibold text-foreground">{token.symbol ?? "—"}</span>
                       <span className="text-muted-foreground font-mono text-xs">
                         {token.mint?.slice(0, 8)}...
                       </span>
                     </div>
+                  </td>
+                  <td className="py-3 px-4 text-right tabular-nums text-muted-foreground whitespace-nowrap">
+                    {formatAge(token.detectedAt)}
                   </td>
                   <td className="py-3 px-4 text-right tabular-nums">
                     {token.price < 0.000001
@@ -90,6 +116,9 @@ export default function TokensPage() {
                         {(token.mlScore * 100).toFixed(0)}%
                       </span>
                     ) : "—"}
+                  </td>
+                  <td className="py-3 px-4 text-center">
+                    <ActionBadge action={token.actionTaken} />
                   </td>
                   <td className="py-3 px-4 min-w-32">
                     <BondingCurveBar progress={token.bondingCurveProgress} />

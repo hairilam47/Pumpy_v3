@@ -104,6 +104,10 @@ export interface UpdateStrategyBody {
   enabled?: boolean;
   buyAmountSol?: number;
   slippageBps?: number;
+  takeProfitPct?: number;
+  stopLossPct?: number;
+  trailingStopPct?: number;
+  minLiquiditySol?: number;
 }
 
 export interface TokenInfo {
@@ -116,6 +120,9 @@ export interface TokenInfo {
   volume24hSol?: number;
   holderCount?: number;
   bondingCurveProgress: number;
+  mlScore?: number;
+  detectedAt?: string;
+  actionTaken?: string;
 }
 
 export interface BotMetrics {

@@ -102,6 +102,7 @@ export interface PortfolioSummaryResponse {
 
 export interface OrderUpdate {
   order_id: string;
+  token_mint?: string;
   status: string;
   signature?: string;
   error?: string;

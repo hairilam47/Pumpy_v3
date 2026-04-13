@@ -1,8 +1,10 @@
 import { createServer } from "http";
 import { WebSocketServer, type WebSocket } from "ws";
+import { eq } from "drizzle-orm";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { grpcBot } from "./lib/grpc-client";
+import { db, tradesTable } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
 
@@ -32,22 +34,45 @@ wss.on("connection", (ws: WebSocket, orderIds: string[]) => {
     try {
       cancelGrpc = grpcBot.streamOrders(
         ids,
-        (update) => {
+        async (update) => {
+          if (ws.readyState !== ws.OPEN) return;
+
+          // Base DTO normalized from gRPC snake_case to camelCase
+          const normalized: Record<string, unknown> = {
+            id: update.order_id,
+            mint: update.token_mint ?? "",
+            status: update.status,
+            signature: update.signature,
+            error: update.error,
+            executedAt: update.executed_at,
+            executedPrice: update.executed_price,
+            amountSol: update.executed_amount != null
+              ? Number(update.executed_amount) / 1e9
+              : undefined,
+            createdAt: new Date().toISOString(),
+          };
+
+          // Enrich with side, symbol, strategy, pnlSol from trade DB record
+          try {
+            const rows = await db
+              .select()
+              .from(tradesTable)
+              .where(eq(tradesTable.id, update.order_id))
+              .limit(1);
+            if (rows.length > 0) {
+              const row = rows[0]!;
+              normalized.side = row.side;
+              normalized.tokenSymbol = row.tokenSymbol;
+              normalized.tokenName = row.tokenName;
+              normalized.strategy = row.strategy;
+              normalized.pnlSol = row.pnlSol;
+              if (normalized.amountSol == null) normalized.amountSol = row.amountSol;
+            }
+          } catch {
+            // DB not available — continue with base fields
+          }
+
           if (ws.readyState === ws.OPEN) {
-            // Normalize snake_case gRPC fields to camelCase for the browser
-            const normalized = {
-              id: update.order_id,
-              mint: update.token_mint ?? "",
-              status: update.status,
-              signature: update.signature,
-              error: update.error,
-              executedAt: update.executed_at,
-              executedPrice: update.executed_price,
-              amountSol: update.executed_amount != null
-                ? Number(update.executed_amount) / 1e9
-                : undefined,
-              createdAt: new Date().toISOString(),
-            };
             ws.send(JSON.stringify(normalized));
           }
         },

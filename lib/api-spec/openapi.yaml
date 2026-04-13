@@ -371,6 +371,18 @@ components:
           type: number
         slippageBps:
           type: integer
+        takeProfitPct:
+          type: number
+          description: Take-profit threshold in percent (e.g. 50 = +50%)
+        stopLossPct:
+          type: number
+          description: Stop-loss threshold in percent (e.g. 15 = -15%)
+        trailingStopPct:
+          type: number
+          description: Trailing stop distance in percent
+        minLiquiditySol:
+          type: number
+          description: Minimum pool liquidity required in SOL
 
     TokenInfo:
       type: object
@@ -393,6 +405,16 @@ components:
           type: integer
         bondingCurveProgress:
           type: number
+        mlScore:
+          type: number
+          description: ML confidence score 0-1
+        detectedAt:
+          type: string
+          format: date-time
+          description: ISO timestamp when this token was first detected
+        actionTaken:
+          type: string
+          description: "What the bot did: SNIPED, WATCHED, SKIPPED"
       required: [mint, price, liquiditySol, marketCapSol, bondingCurveProgress]
 
     BotMetrics:

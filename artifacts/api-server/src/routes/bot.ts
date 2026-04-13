@@ -246,7 +246,15 @@ router.get("/bot/strategies", async (_req: Request, res: Response) => {
 router.patch("/bot/strategies/:strategyName", async (req: Request, res: Response) => {
   try {
     const { strategyName } = req.params;
-    const body = req.body as { enabled?: boolean; buyAmountSol?: number; slippageBps?: number };
+    const body = req.body as {
+      enabled?: boolean;
+      buyAmountSol?: number;
+      slippageBps?: number;
+      takeProfitPct?: number;
+      stopLossPct?: number;
+      trailingStopPct?: number;
+      minLiquiditySol?: number;
+    };
 
     const pyData = await fetchPython(`/api/strategies/${strategyName}`, {
       method: "PATCH",
@@ -256,6 +264,10 @@ router.patch("/bot/strategies/:strategyName", async (req: Request, res: Response
         enabled: body.enabled,
         buy_amount_sol: body.buyAmountSol,
         slippage_bps: body.slippageBps,
+        take_profit_pct: body.takeProfitPct,
+        stop_loss_pct: body.stopLossPct,
+        trailing_stop_pct: body.trailingStopPct,
+        min_liquidity_sol: body.minLiquiditySol,
       }),
     }) as Record<string, unknown> | null;
 
@@ -289,6 +301,8 @@ router.get("/bot/tokens", async (_req: Request, res: Response) => {
         holderCount: t.holder_count,
         bondingCurveProgress: t.bonding_curve_progress ?? 0,
         mlScore: t.ml_score ?? t.sniper_score ?? null,
+        detectedAt: t.detected_at ?? t.created_at ?? null,
+        actionTaken: t.action_taken ?? t.action ?? null,
       }));
       res.json(tokens);
       return;
@@ -451,21 +465,23 @@ router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
 
 router.post("/bot/start", async (_req: Request, res: Response) => {
   try {
-    // Activate all strategies via Python engine
-    const strategies = ["sniper", "momentum"] as const;
-    const results = await Promise.allSettled(
-      strategies.map((name) =>
-        fetchPython(`/api/strategy/activate`, {
+    const strategies = ["sniper", "momentum"];
+    let succeeded = 0;
+    for (const name of strategies) {
+      try {
+        const result = await fetchPython("/api/strategy/activate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_name: name, active: true }),
-        }).catch(() => null)
-      )
-    );
-    const anySuccess = results.some((r) => r.status === "fulfilled");
+          body: JSON.stringify({ strategy_name: name, enabled: true }),
+        });
+        if (result !== null) succeeded++;
+      } catch { /* strategy failed — continue */ }
+    }
     res.json({
-      success: anySuccess,
-      message: anySuccess ? "Strategies activated" : "Could not contact Python engine — start the engine first",
+      success: succeeded > 0,
+      message: succeeded > 0
+        ? `${succeeded} strategy/strategies activated`
+        : "Python engine unreachable — start the python-strategy service first",
     });
   } catch {
     res.json({ success: false, message: "Start request failed" });
@@ -474,21 +490,23 @@ router.post("/bot/start", async (_req: Request, res: Response) => {
 
 router.post("/bot/stop", async (_req: Request, res: Response) => {
   try {
-    // Deactivate all strategies via Python engine
-    const strategies = ["sniper", "momentum"] as const;
-    const results = await Promise.allSettled(
-      strategies.map((name) =>
-        fetchPython(`/api/strategy/activate`, {
+    const strategies = ["sniper", "momentum"];
+    let succeeded = 0;
+    for (const name of strategies) {
+      try {
+        const result = await fetchPython("/api/strategy/activate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ strategy_name: name, active: false }),
-        }).catch(() => null)
-      )
-    );
-    const anySuccess = results.some((r) => r.status === "fulfilled");
+          body: JSON.stringify({ strategy_name: name, enabled: false }),
+        });
+        if (result !== null) succeeded++;
+      } catch { /* strategy failed — continue */ }
+    }
     res.json({
-      success: anySuccess,
-      message: anySuccess ? "Strategies deactivated" : "Could not contact Python engine — engine may already be stopped",
+      success: succeeded > 0,
+      message: succeeded > 0
+        ? `${succeeded} strategy/strategies deactivated`
+        : "Python engine unreachable — engine may already be stopped",
     });
   } catch {
     res.json({ success: false, message: "Stop request failed" });

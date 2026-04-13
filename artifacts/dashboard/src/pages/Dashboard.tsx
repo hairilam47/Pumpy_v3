@@ -56,9 +56,12 @@ const MOCK_PNL_DATA = Array.from({ length: 24 }, (_, i) => ({
 
 export default function DashboardPage() {
   const qc = useQueryClient();
-  const { data: portfolio } = useGetPortfolio();
-  const { data: status } = useGetBotStatus();
-  const { data: metrics } = useGetMetrics();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: portfolio } = useGetPortfolio({ query: { refetchInterval: 5_000 } as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: status } = useGetBotStatus({ query: { refetchInterval: 5_000 } as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: metrics } = useGetMetrics({ query: { refetchInterval: 10_000 } as any });
 
   const pnl = portfolio?.dailyPnlSol ?? 0;
   const totalPnl = portfolio?.totalPnlSol ?? 0;
@@ -91,6 +94,15 @@ export default function DashboardPage() {
         {status?.environment && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400">
             <span className="uppercase tracking-wider">{status.environment}</span>
+          </div>
+        )}
+        {/* Active strategies */}
+        {status?.activeStrategies && (status.activeStrategies as string[]).length > 0 && (
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-muted-foreground">Active:</span>
+            {(status.activeStrategies as string[]).map((s) => (
+              <span key={s} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary capitalize">{s}</span>
+            ))}
           </div>
         )}
 
