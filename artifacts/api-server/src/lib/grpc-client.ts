@@ -10,60 +10,45 @@ const GRPC_HOST = process.env.GRPC_HOST ?? "localhost";
 const GRPC_PORT = process.env.GRPC_PORT ?? "50051";
 const GRPC_ADDR = `${GRPC_HOST}:${GRPC_PORT}`;
 
-let _packageDef: protoLoader.PackageDefinition | null = null;
-let _grpcClient: grpc.Client | null = null;
+let _client: grpc.Client | null = null;
 
-function getPackageDef(): protoLoader.PackageDefinition {
-  if (!_packageDef) {
-    _packageDef = protoLoader.loadSync(PROTO_PATH, {
+function getClient(): grpc.Client {
+  if (!_client) {
+    const def = protoLoader.loadSync(PROTO_PATH, {
       keepCase: true,
       longs: String,
       enums: String,
       defaults: true,
       oneofs: true,
     });
+    const pkg = grpc.loadPackageDefinition(def) as Record<string, grpc.GrpcObject>;
+    const botPkg = pkg["bot"] as Record<string, grpc.ServiceClientConstructor>;
+    const BotService = botPkg["Bot"];
+    _client = new BotService(GRPC_ADDR, grpc.credentials.createInsecure(), {
+      "grpc.keepalive_time_ms": 10_000,
+      "grpc.keepalive_timeout_ms": 5_000,
+      "grpc.keepalive_permit_without_calls": 1,
+    });
   }
-  return _packageDef;
+  return _client;
 }
 
-function getBotService(): grpc.GrpcObject {
-  const def = getPackageDef();
-  return (grpc.loadPackageDefinition(def) as Record<string, grpc.GrpcObject>)["bot"] as grpc.GrpcObject;
-}
+type RawClient = Record<string, unknown>;
 
-function getRawClient(): grpc.Client {
-  if (!_grpcClient) {
-    const botService = getBotService();
-    const BotService = botService["Bot"] as grpc.ServiceClientConstructor;
-    _grpcClient = new BotService(
-      GRPC_ADDR,
-      grpc.credentials.createInsecure(),
-      {
-        "grpc.keepalive_time_ms": 10_000,
-        "grpc.keepalive_timeout_ms": 5_000,
-        "grpc.keepalive_permit_without_calls": 1,
-      }
-    );
-  }
-  return _grpcClient;
-}
-
-type GrpcMethod = (
-  request: Record<string, unknown>,
-  callback: (err: grpc.ServiceError | null, response: unknown) => void
-) => grpc.ClientUnaryCall;
-
-function callRpc<T>(method: string, request: Record<string, unknown>): Promise<T> {
+function callUnary<T>(method: string, request: Record<string, unknown>): Promise<T> {
   return new Promise((resolve, reject) => {
-    const client = getRawClient() as Record<string, GrpcMethod>;
+    const client = getClient() as unknown as RawClient;
     const fn = client[method];
     if (typeof fn !== "function") {
       reject(new Error(`gRPC method not found: ${method}`));
       return;
     }
-    fn.call(client, request, (err, response) => {
+    (fn as (
+      req: Record<string, unknown>,
+      cb: (err: grpc.ServiceError | null, res: T) => void
+    ) => void).call(client, request, (err, res) => {
       if (err) reject(err);
-      else resolve(response as T);
+      else resolve(res);
     });
   });
 }
@@ -94,6 +79,18 @@ export interface OrderStatusResponse {
   executed_at?: string;
 }
 
+export interface TokenInfoResponse {
+  mint: string;
+  name: string;
+  symbol: string;
+  price: number;
+  liquidity_sol: number;
+  market_cap_sol: number;
+  volume_24h_sol: number;
+  holder_count: number;
+  bonding_curve_progress: number;
+}
+
 export interface PortfolioSummaryResponse {
   total_value_sol: number;
   cash_balance_sol: number;
@@ -116,19 +113,23 @@ export interface OrderUpdate {
 
 export const grpcBot = {
   async submitOrder(req: SubmitOrderRequest): Promise<SubmitOrderResponse> {
-    return callRpc<SubmitOrderResponse>("SubmitOrder", req as unknown as Record<string, unknown>);
+    return callUnary<SubmitOrderResponse>("SubmitOrder", req as unknown as Record<string, unknown>);
   },
 
   async cancelOrder(orderId: string): Promise<{ success: boolean; message: string }> {
-    return callRpc("CancelOrder", { order_id: orderId });
+    return callUnary("CancelOrder", { order_id: orderId });
   },
 
   async getOrderStatus(orderId: string): Promise<OrderStatusResponse> {
-    return callRpc<OrderStatusResponse>("GetOrderStatus", { order_id: orderId });
+    return callUnary<OrderStatusResponse>("GetOrderStatus", { order_id: orderId });
+  },
+
+  async getTokenInfo(mint: string): Promise<TokenInfoResponse> {
+    return callUnary<TokenInfoResponse>("GetTokenInfo", { token_mint: mint });
   },
 
   async getPortfolioSummary(): Promise<PortfolioSummaryResponse> {
-    return callRpc<PortfolioSummaryResponse>("GetPortfolioSummary", {});
+    return callUnary<PortfolioSummaryResponse>("GetPortfolioSummary", {});
   },
 
   /**
@@ -141,20 +142,13 @@ export const grpcBot = {
     onUpdate: (update: OrderUpdate) => void,
     onEnd?: (err?: grpc.ServiceError) => void
   ): () => void {
-    const client = getRawClient() as Record<string, (req: Record<string, unknown>) => grpc.ClientReadableStream<OrderUpdate>>;
-    const call = client["StreamOrders"]!({ order_ids: orderIds });
+    const client = getClient() as unknown as RawClient;
+    const fn = client["StreamOrders"] as (req: Record<string, unknown>) => grpc.ClientReadableStream<OrderUpdate>;
+    const call = fn.call(client, { order_ids: orderIds });
 
-    call.on("data", (update: OrderUpdate) => {
-      onUpdate(update);
-    });
-
-    call.on("end", () => {
-      onEnd?.();
-    });
-
-    call.on("error", (err: grpc.ServiceError) => {
-      onEnd?.(err);
-    });
+    call.on("data", (update: OrderUpdate) => onUpdate(update));
+    call.on("end", () => onEnd?.());
+    call.on("error", (err: grpc.ServiceError) => onEnd?.(err));
 
     return () => call.cancel();
   },

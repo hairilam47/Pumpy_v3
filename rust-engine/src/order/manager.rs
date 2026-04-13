@@ -242,9 +242,16 @@ impl OrderManager {
             }
         };
 
-        // Execute via Jito MEV bundle if protection is enabled and Jito client is available,
-        // otherwise fall back to direct RPC submission.
-        let result = self.execute_with_mev_protection(&mint, &order).await;
+        // Execute within the configured timeout; fail the order if it exceeds it.
+        let result = tokio::time::timeout(
+            self.config.order_timeout,
+            self.execute_with_mev_protection(&mint, &order),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            warn!("Order {} timed out after {:?}", order.id, self.config.order_timeout);
+            Err(format!("Order timed out after {:?}", self.config.order_timeout).into())
+        });
 
         match result {
             Ok(signature) => {
@@ -571,25 +578,35 @@ impl OrderManagerMinimal {
             }
         };
 
-        // Attempt Jito MEV bundle; fall back to direct RPC on failure
-        let result = if self.mev_enabled {
-            if let Some(jito) = &self.jito_client {
-                match self.execute_via_jito_minimal(&mint, &order, jito.clone()).await {
-                    Ok(sig) => {
-                        self.metrics.jito_bundles_landed.inc();
-                        Ok(sig)
-                    }
-                    Err(e) => {
-                        warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
+        // Execute within the configured timeout; fail the order if it exceeds the limit.
+        let result = tokio::time::timeout(
+            self.config.order_timeout,
+            async {
+                if self.mev_enabled {
+                    if let Some(jito) = &self.jito_client {
+                        match self.execute_via_jito_minimal(&mint, &order, jito.clone()).await {
+                            Ok(sig) => {
+                                self.metrics.jito_bundles_landed.inc();
+                                Ok(sig)
+                            }
+                            Err(e) => {
+                                warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
+                                self.execute_direct(&mint, &order).await
+                            }
+                        }
+                    } else {
                         self.execute_direct(&mint, &order).await
                     }
+                } else {
+                    self.execute_direct(&mint, &order).await
                 }
-            } else {
-                self.execute_direct(&mint, &order).await
-            }
-        } else {
-            self.execute_direct(&mint, &order).await
-        };
+            },
+        )
+        .await
+        .unwrap_or_else(|_| {
+            warn!("Order {} timed out after {:?}", order.id, self.config.order_timeout);
+            Err(format!("Order timed out after {:?}", self.config.order_timeout).into())
+        });
 
         match result {
             Ok(sig) => {

@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { db, tradesTable, strategiesTable } from "@workspace/db";
 import { desc } from "drizzle-orm";
+import { grpcBot } from "../lib/grpc-client";
 
 const router = Router();
 
@@ -19,11 +20,36 @@ async function fetchPython(path: string, init?: RequestInit): Promise<unknown | 
   }
 }
 
-// GET /api/bot/portfolio
-router.get("/bot/portfolio", async (req: Request, res: Response) => {
+// ─── Portfolio ────────────────────────────────────────────────────────────────
+
+// GET /api/bot/portfolio  →  Rust gRPC first, Python fallback, then static mock
+router.get("/bot/portfolio", async (_req: Request, res: Response) => {
   try {
+    // 1. Try Rust gRPC
+    try {
+      const grpc = await grpcBot.getPortfolioSummary();
+      res.json({
+        totalValueSol: grpc.total_value_sol,
+        cashBalanceSol: grpc.cash_balance_sol,
+        positionsValueSol: grpc.positions_value_sol,
+        dailyPnlSol: grpc.daily_pnl_sol,
+        totalPnlSol: grpc.total_pnl_sol,
+        openPositionsCount: grpc.open_positions_count,
+        winRate: grpc.win_rate,
+        source: "rust",
+      });
+      return;
+    } catch { /* fall through */ }
+
+    // 2. Try Python FastAPI
     const pyData = await fetchPython("/api/portfolio") as Record<string, unknown> | null;
-    res.json(pyData ?? {
+    if (pyData) {
+      res.json({ ...pyData, source: "python" });
+      return;
+    }
+
+    // 3. Static mock
+    res.json({
       totalValueSol: 10.0,
       cashBalanceSol: 9.5,
       positionsValueSol: 0.5,
@@ -31,33 +57,37 @@ router.get("/bot/portfolio", async (req: Request, res: Response) => {
       totalPnlSol: 0.0,
       openPositionsCount: 0,
       winRate: 0,
+      source: "mock",
     });
   } catch {
     res.status(500).json({ error: "Failed to get portfolio" });
   }
 });
 
-// GET /api/bot/trades
+// ─── Trades ───────────────────────────────────────────────────────────────────
+
+// GET /api/bot/trades  →  DB first, then mock
 router.get("/bot/trades", async (req: Request, res: Response) => {
   try {
     const limit = Math.min(parseInt(String(req.query.limit ?? "50")), 200);
     const strategy = req.query.strategy as string | undefined;
 
-    let rows: unknown[];
     try {
       const query = db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(limit);
-      rows = await query;
-    } catch {
-      rows = generateMockTrades(limit, strategy);
-    }
+      const rows = await query;
+      res.json(rows);
+      return;
+    } catch { /* fall through */ }
 
-    res.json(rows);
+    res.json(generateMockTrades(limit, strategy));
   } catch {
     res.status(500).json({ error: "Failed to list trades" });
   }
 });
 
-// POST /api/bot/orders
+// ─── Orders ───────────────────────────────────────────────────────────────────
+
+// POST /api/bot/orders  →  Rust gRPC SubmitOrder first, Python fallback
 router.post("/bot/orders", async (req: Request, res: Response) => {
   try {
     const body = req.body as {
@@ -70,10 +100,30 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
     };
 
     if (!body.tokenMint || !body.side || !body.amountSol) {
-      res.status(400).json({ error: "Missing required fields" });
+      res.status(400).json({ error: "Missing required fields: tokenMint, side, amountSol" });
       return;
     }
 
+    // 1. Rust gRPC
+    try {
+      const grpcResp = await grpcBot.submitOrder({
+        token_mint: body.tokenMint,
+        order_type: body.orderType ?? "MARKET",
+        side: body.side,
+        amount: Math.round(body.amountSol * 1_000_000_000),
+        slippage_bps: body.slippageBps ?? 100,
+        strategy_name: body.strategyName ?? "manual",
+      });
+      res.json({
+        orderId: grpcResp.order_id,
+        success: grpcResp.success,
+        message: grpcResp.message,
+        source: "rust",
+      });
+      return;
+    } catch { /* fall through */ }
+
+    // 2. Python fallback
     const pyData = await fetchPython("/api/orders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -87,48 +137,72 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
       }),
     }) as Record<string, unknown> | null;
 
-    if (pyData) {
-      res.json(pyData);
-    } else {
-      res.json({ success: false, orderId: "", message: "Python engine not connected" });
-    }
+    res.json(pyData ?? { success: false, orderId: "", message: "Engine not available" });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Invalid request";
     res.status(400).json({ error: msg });
   }
 });
 
-// GET /api/bot/orders/:orderId
+// GET /api/bot/orders/:orderId  →  Rust gRPC GetOrderStatus first, Python fallback
 router.get("/bot/orders/:orderId", async (req: Request, res: Response) => {
   try {
-    const { orderId } = req.params;
+    const orderId = Array.isArray(req.params.orderId) ? req.params.orderId[0]! : req.params.orderId;
+
+    // 1. Rust gRPC
+    try {
+      const status = await grpcBot.getOrderStatus(orderId);
+      res.json({
+        orderId: status.order_id,
+        status: status.status,
+        signature: status.signature || null,
+        error: status.error || null,
+        executedAt: status.executed_at ?? null,
+        source: "rust",
+      });
+      return;
+    } catch { /* fall through */ }
+
+    // 2. Python fallback
     const pyData = await fetchPython(`/api/orders/${orderId}`) as Record<string, unknown> | null;
-    if (!pyData) {
-      res.status(404).json({ error: "Order not found" });
+    if (pyData) {
+      res.json(pyData);
       return;
     }
-    res.json(pyData);
+
+    res.status(404).json({ error: "Order not found" });
   } catch {
     res.status(404).json({ error: "Order not found" });
   }
 });
 
-// DELETE /api/bot/orders/:orderId
+// DELETE /api/bot/orders/:orderId  →  Rust gRPC CancelOrder first, Python fallback
 router.delete("/bot/orders/:orderId", async (req: Request, res: Response) => {
   try {
-    const { orderId } = req.params;
+    const orderId = Array.isArray(req.params.orderId) ? req.params.orderId[0]! : req.params.orderId;
+
+    // 1. Rust gRPC
+    try {
+      const resp = await grpcBot.cancelOrder(orderId);
+      res.json({ success: resp.success, message: resp.message, source: "rust" });
+      return;
+    } catch { /* fall through */ }
+
+    // 2. Python fallback
     const pyData = await fetchPython(`/api/orders/${orderId}`, { method: "DELETE" }) as Record<string, unknown> | null;
-    res.json(pyData ?? { success: true, message: "Cancelled" });
+    res.json(pyData ?? { success: true, message: "Cancelled (offline)" });
   } catch {
     res.status(500).json({ error: "Cancel failed" });
   }
 });
 
-// GET /api/bot/strategies
-router.get("/bot/strategies", async (req: Request, res: Response) => {
+// ─── Strategies ───────────────────────────────────────────────────────────────
+
+// GET /api/bot/strategies  →  Python first (owns strategy state), then DB, then mock
+router.get("/bot/strategies", async (_req: Request, res: Response) => {
   try {
     const pyData = await fetchPython("/api/strategies") as unknown[] | null;
-    if (pyData && Array.isArray(pyData)) {
+    if (Array.isArray(pyData)) {
       const mapped = pyData.map((s: unknown) => {
         const strategy = s as Record<string, unknown>;
         return {
@@ -145,10 +219,9 @@ router.get("/bot/strategies", async (req: Request, res: Response) => {
       return;
     }
 
-    // Fallback to DB
     try {
       const rows = await db.select().from(strategiesTable);
-      const mapped = rows.map((r) => ({
+      res.json(rows.map((r) => ({
         name: r.name,
         enabled: r.enabled,
         tradesExecuted: r.tradesExecuted,
@@ -156,12 +229,9 @@ router.get("/bot/strategies", async (req: Request, res: Response) => {
         winRate: r.tradesExecuted > 0 ? (r.tradesWon / r.tradesExecuted) * 100 : 0,
         totalPnlSol: r.totalPnlSol,
         buyAmountSol: r.buyAmountSol,
-      }));
-      res.json(mapped);
+      })));
       return;
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
 
     res.json([
       { name: "sniper", enabled: true, tradesExecuted: 0, tradesWon: 0, winRate: 0, totalPnlSol: 0, buyAmountSol: 0.05 },
@@ -172,7 +242,7 @@ router.get("/bot/strategies", async (req: Request, res: Response) => {
   }
 });
 
-// PATCH /api/bot/strategies/:strategyName
+// PATCH /api/bot/strategies/:strategyName  →  Python owns strategy config
 router.patch("/bot/strategies/:strategyName", async (req: Request, res: Response) => {
   try {
     const { strategyName } = req.params;
@@ -194,22 +264,17 @@ router.patch("/bot/strategies/:strategyName", async (req: Request, res: Response
       return;
     }
 
-    res.json({
-      name: strategyName,
-      enabled: body.enabled ?? true,
-      tradesExecuted: 0,
-      tradesWon: 0,
-      winRate: 0,
-      totalPnlSol: 0,
-    });
+    res.json({ name: strategyName, enabled: body.enabled ?? true, tradesExecuted: 0, tradesWon: 0, winRate: 0, totalPnlSol: 0 });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Update failed";
     res.status(400).json({ error: msg });
   }
 });
 
-// GET /api/bot/tokens
-router.get("/bot/tokens", async (req: Request, res: Response) => {
+// ─── Tokens ───────────────────────────────────────────────────────────────────
+
+// GET /api/bot/tokens  →  Python owns token cache
+router.get("/bot/tokens", async (_req: Request, res: Response) => {
   try {
     const pyData = await fetchPython("/api/tokens") as Record<string, unknown> | null;
     if (pyData && typeof pyData === "object") {
@@ -233,10 +298,30 @@ router.get("/bot/tokens", async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/bot/tokens/:mint
+// GET /api/bot/tokens/:mint  →  Rust gRPC GetTokenInfo first, Python fallback
 router.get("/bot/tokens/:mint", async (req: Request, res: Response) => {
   try {
-    const { mint } = req.params;
+    const mint = Array.isArray(req.params.mint) ? req.params.mint[0]! : req.params.mint;
+
+    // 1. Rust gRPC
+    try {
+      const info = await grpcBot.getTokenInfo(mint);
+      res.json({
+        mint: info.mint,
+        name: info.name,
+        symbol: info.symbol,
+        price: info.price,
+        liquiditySol: info.liquidity_sol,
+        marketCapSol: info.market_cap_sol,
+        volume24hSol: info.volume_24h_sol,
+        holderCount: info.holder_count,
+        bondingCurveProgress: info.bonding_curve_progress,
+        source: "rust",
+      });
+      return;
+    } catch { /* fall through */ }
+
+    // 2. Python fallback
     const pyData = await fetchPython(`/api/tokens/${mint}`) as Record<string, unknown> | null;
     if (!pyData) {
       res.status(404).json({ error: "Token not found" });
@@ -252,14 +337,17 @@ router.get("/bot/tokens/:mint", async (req: Request, res: Response) => {
       volume24hSol: pyData.volume_24h_sol,
       holderCount: pyData.holder_count,
       bondingCurveProgress: pyData.bonding_curve_progress ?? 0,
+      source: "python",
     });
   } catch {
     res.status(404).json({ error: "Token not found" });
   }
 });
 
-// GET /api/bot/metrics
-router.get("/bot/metrics", async (req: Request, res: Response) => {
+// ─── Metrics ──────────────────────────────────────────────────────────────────
+
+// GET /api/bot/metrics  →  Python owns Prometheus-style metrics
+router.get("/bot/metrics", async (_req: Request, res: Response) => {
   try {
     const pyData = await fetchPython("/api/metrics") as Record<string, unknown> | null;
     res.json(pyData ?? {
@@ -279,14 +367,23 @@ router.get("/bot/metrics", async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/bot/status
-router.get("/bot/status", async (req: Request, res: Response) => {
+// ─── Status ───────────────────────────────────────────────────────────────────
+
+// GET /api/bot/status  →  probe Rust gRPC + Python health
+router.get("/bot/status", async (_req: Request, res: Response) => {
   try {
+    let rustConnected = false;
+    try {
+      await grpcBot.getPortfolioSummary();
+      rustConnected = true;
+    } catch { /* Rust engine not running */ }
+
     const pyHealth = await fetchPython("/api/health");
     const pyConnected = !!pyHealth;
+
     res.json({
-      running: pyConnected,
-      rustEngineConnected: false,
+      running: rustConnected || pyConnected,
+      rustEngineConnected: rustConnected,
       pythonEngineRunning: pyConnected,
       walletAddress: process.env.WALLET_ADDRESS ?? "",
       solBalance: 0,
@@ -307,6 +404,8 @@ router.get("/bot/status", async (req: Request, res: Response) => {
     });
   }
 });
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function generateMockTrades(limit: number, strategy?: string) {
   const strategies = strategy ? [strategy] : ["sniper", "momentum", "manual"];

@@ -73,7 +73,7 @@ httpServer.on("upgrade", (req, socket, head) => {
   const url = req.url ?? "";
   if (url.startsWith("/api/bot/stream")) {
     const params = new URL(url, "http://localhost");
-    const orderIds = params.getAll("order_id");
+    const orderIds = params.searchParams.getAll("order_id");
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, orderIds);
