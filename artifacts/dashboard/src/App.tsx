@@ -7,9 +7,10 @@ import DashboardPage from "@/pages/Dashboard";
 import StrategiesPage from "@/pages/Strategies";
 import TokensPage from "@/pages/Tokens";
 import TradesPage from "@/pages/Trades";
+import SettingsPage from "@/pages/Settings";
 import { cn } from "@/lib/utils";
 import {
-  LayoutDashboard, Bot, Coins, History,
+  LayoutDashboard, Bot, Coins, History, Settings2,
   Activity, Github, ExternalLink
 } from "lucide-react";
 
@@ -27,6 +28,7 @@ const NAV_LINKS = [
   { href: "/strategies", label: "Strategies", icon: Bot },
   { href: "/tokens", label: "Tokens", icon: Coins },
   { href: "/trades", label: "Trades", icon: History },
+  { href: "/settings", label: "Settings", icon: Settings2 },
 ];
 
 function Sidebar() {
@@ -110,6 +112,7 @@ function Router() {
         <Route path="/strategies" component={StrategiesPage} />
         <Route path="/tokens" component={TokensPage} />
         <Route path="/trades" component={TradesPage} />
+        <Route path="/settings" component={SettingsPage} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

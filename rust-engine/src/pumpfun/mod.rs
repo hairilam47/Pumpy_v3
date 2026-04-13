@@ -2,7 +2,6 @@ pub mod bonding_curve;
 pub mod instructions;
 
 use std::sync::Arc;
-use std::path::PathBuf;
 use std::str::FromStr;
 use tokio::sync::broadcast;
 use tracing::{info, warn, error};
@@ -53,9 +52,9 @@ pub struct PumpFunClient {
 impl PumpFunClient {
     pub fn new(
         rpc_manager: Arc<RpcManager>,
-        keypair_path: PathBuf,
+        keypair_bytes: Vec<u8>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let keypair = load_keypair(&keypair_path)?;
+        let keypair = Keypair::from_bytes(&keypair_bytes)?;
         let (token_event_tx, _) = broadcast::channel(1000);
 
         info!("PumpFun client initialized with wallet: {}", keypair.pubkey());
@@ -294,15 +293,3 @@ impl PumpFunClient {
     }
 }
 
-fn load_keypair(path: &PathBuf) -> Result<Keypair, Box<dyn std::error::Error + Send + Sync>> {
-    if path.exists() {
-        let data = std::fs::read_to_string(path)?;
-        let bytes: Vec<u8> = serde_json::from_str(&data)?;
-        Ok(Keypair::from_bytes(&bytes)?)
-    } else {
-        Err(format!(
-            "Keypair file not found at {:?}. Set KEYPAIR_PATH to the path of your wallet keypair JSON file.",
-            path
-        ).into())
-    }
-}

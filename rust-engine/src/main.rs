@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize PumpFun client
     let pumpfun_client = Arc::new(
-        PumpFunClient::new(rpc_manager.clone(), config.keypair_path.clone())
+        PumpFunClient::new(rpc_manager.clone(), config.keypair_bytes.clone())
             .map_err(|e| format!("PumpFun client error: {}", e))?,
     );
     info!("PumpFun client initialized: wallet={}", pumpfun_client.pubkey());

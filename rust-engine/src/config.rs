@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use serde_json;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -8,7 +8,7 @@ pub struct Config {
     pub redis_url: String,
     pub grpc_port: u16,
     pub metrics_port: u16,
-    pub keypair_path: PathBuf,
+    pub keypair_bytes: Vec<u8>,
     pub rpc_endpoints: Vec<RpcEndpointConfig>,
     pub jito_bundle_url: Option<String>,
     pub execution_workers: usize,
@@ -109,9 +109,9 @@ impl Config {
         // Critical values must be supplied via environment — fail fast otherwise
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL is required but not set")?;
-        let keypair_path = PathBuf::from(
-            env::var("KEYPAIR_PATH").map_err(|_| "KEYPAIR_PATH is required but not set")?,
-        );
+
+        // Resolve keypair bytes from WALLET_PRIVATE_KEY (base58 or JSON array) OR KEYPAIR_PATH file
+        let keypair_bytes = load_keypair_bytes()?;
 
         Ok(Self {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
@@ -126,7 +126,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(9091),
-            keypair_path,
+            keypair_bytes,
             rpc_endpoints,
             jito_bundle_url: env::var("JITO_BUNDLE_URL").ok(),
             execution_workers: env::var("EXECUTION_WORKERS")
@@ -198,4 +198,60 @@ impl Config {
             },
         })
     }
+}
+
+/// Load wallet keypair bytes from:
+///   1. WALLET_PRIVATE_KEY env var — accepts a base58-encoded private key string
+///      (the 64-byte Solana keypair encoded as base58) OR a JSON byte array
+///      like `[1,2,3,...,64]`.
+///   2. KEYPAIR_PATH env var — path to a JSON file containing the byte array.
+///
+/// Returns the raw 64-byte keypair (32 secret bytes + 32 public key bytes).
+pub fn load_keypair_bytes() -> Result<Vec<u8>, String> {
+    // Try WALLET_PRIVATE_KEY first (no file needed — ideal for Replit secrets)
+    if let Ok(key_str) = env::var("WALLET_PRIVATE_KEY") {
+        let key_str = key_str.trim();
+        // Detect JSON array: starts with '['
+        if key_str.starts_with('[') {
+            let bytes: Vec<u8> = serde_json::from_str(key_str)
+                .map_err(|e| format!("WALLET_PRIVATE_KEY: invalid JSON byte array — {}", e))?;
+            if bytes.len() != 64 {
+                return Err(format!(
+                    "WALLET_PRIVATE_KEY: expected 64 bytes, got {}. \
+                     Export your full keypair (secret key + public key).",
+                    bytes.len()
+                ));
+            }
+            return Ok(bytes);
+        }
+        // Otherwise treat as base58
+        let bytes = bs58::decode(key_str)
+            .into_vec()
+            .map_err(|e| format!("WALLET_PRIVATE_KEY: invalid base58 — {}", e))?;
+        if bytes.len() != 64 {
+            return Err(format!(
+                "WALLET_PRIVATE_KEY (base58): expected 64 bytes, got {}.",
+                bytes.len()
+            ));
+        }
+        return Ok(bytes);
+    }
+
+    // Fall back to KEYPAIR_PATH file
+    let path_str = env::var("KEYPAIR_PATH").map_err(|_| {
+        "Wallet not configured. Set either:\n  \
+         WALLET_PRIVATE_KEY — your base58 or JSON-array private key\n  \
+         KEYPAIR_PATH       — path to a Solana keypair JSON file".to_string()
+    })?;
+    let data = std::fs::read_to_string(&path_str)
+        .map_err(|e| format!("KEYPAIR_PATH '{}': cannot read file — {}", path_str, e))?;
+    let bytes: Vec<u8> = serde_json::from_str(data.trim())
+        .map_err(|e| format!("KEYPAIR_PATH '{}': invalid JSON — {}", path_str, e))?;
+    if bytes.len() != 64 {
+        return Err(format!(
+            "KEYPAIR_PATH '{}': expected 64 bytes, got {}.",
+            path_str, bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
