@@ -207,26 +207,89 @@ impl PumpFunClient {
         Ok(signature.to_string())
     }
 
+    /// Publish a discovered token event to all subscribers
+    pub fn publish_token_event(&self, event: TokenDiscoveredEvent) -> Result<usize, broadcast::error::SendError<TokenDiscoveredEvent>> {
+        self.token_event_tx.send(event)
+    }
+
+    /// Build a buy transaction without submitting it (used for Jito bundle submission)
+    pub async fn build_buy_transaction(
+        &self,
+        mint: &Pubkey,
+        amount: u64,
+        max_sol_cost: u64,
+    ) -> Result<(Transaction, solana_sdk::hash::Hash), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.rpc_manager.get_client().await?;
+        let buyer = self.keypair.pubkey();
+
+        let (bonding_curve, _) = derive_bonding_curve_pda(mint);
+        let associated_bonding_curve = get_associated_token_address(&bonding_curve, mint);
+        let associated_user = get_associated_token_address(&buyer, mint);
+
+        let ix = build_buy_instruction(
+            &buyer,
+            mint,
+            &bonding_curve,
+            &associated_bonding_curve,
+            &associated_user,
+            amount,
+            max_sol_cost,
+        );
+
+        let recent_blockhash = client.get_latest_blockhash().await?;
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&buyer),
+            &[&*self.keypair],
+            recent_blockhash,
+        );
+
+        Ok((tx, recent_blockhash))
+    }
+
+    /// Build a sell transaction without submitting it (used for Jito bundle submission)
+    pub async fn build_sell_transaction(
+        &self,
+        mint: &Pubkey,
+        amount: u64,
+        min_sol_output: u64,
+    ) -> Result<(Transaction, solana_sdk::hash::Hash), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.rpc_manager.get_client().await?;
+        let seller = self.keypair.pubkey();
+
+        let (bonding_curve, _) = derive_bonding_curve_pda(mint);
+        let associated_bonding_curve = get_associated_token_address(&bonding_curve, mint);
+        let associated_user = get_associated_token_address(&seller, mint);
+
+        let ix = build_sell_instruction(
+            &seller,
+            mint,
+            &bonding_curve,
+            &associated_bonding_curve,
+            &associated_user,
+            amount,
+            min_sol_output,
+        );
+
+        let recent_blockhash = client.get_latest_blockhash().await?;
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&seller),
+            &[&*self.keypair],
+            recent_blockhash,
+        );
+
+        Ok((tx, recent_blockhash))
+    }
+
     pub async fn start_token_monitor(
         &self,
-        order_manager: Arc<crate::order::OrderManager>,
+        _order_manager: Arc<crate::order::OrderManager>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let ws_url = self.rpc_manager.get_websocket_url().await;
-        let ws_url = ws_url.unwrap_or_else(|| "wss://api.mainnet-beta.solana.com".to_string());
-
-        info!("Starting Pump.fun WebSocket monitor on {}", ws_url);
-
-        // In a full implementation, this would use solana_client's PubsubClient
-        // to subscribe to PUMPFUN_PROGRAM_ID account changes.
-        // For now, we emit a signal that the monitor is running.
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            info!("WebSocket monitor heartbeat");
-        }
+        Ok(())
     }
 
     pub async fn update_positions(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Update position prices and PnL
         Ok(())
     }
 }

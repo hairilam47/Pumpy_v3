@@ -2998,6 +2998,7 @@ dependencies = [
  "bs58",
  "chrono",
  "dotenvy",
+ "futures-util",
  "prometheus",
  "prost",
  "rand 0.8.5",

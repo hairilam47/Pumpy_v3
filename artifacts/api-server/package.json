@@ -10,6 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.3",
+    "@grpc/proto-loader": "^0.8.0",
+    "@types/ws": "^8.18.1",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
     "cookie-parser": "^1.4.7",
@@ -17,7 +20,8 @@
     "drizzle-orm": "catalog:",
     "express": "^5",
     "pino": "^9",
-    "pino-http": "^10"
+    "pino-http": "^10",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",

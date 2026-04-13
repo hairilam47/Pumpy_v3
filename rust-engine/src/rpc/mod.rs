@@ -92,19 +92,33 @@ impl RpcManager {
         let healthy: Vec<&RpcEndpoint> = endpoints.iter().filter(|e| e.is_healthy).collect();
 
         if healthy.is_empty() {
-            // Fallback to any endpoint if none are healthy
+            // Fallback: use any endpoint (even unhealthy) rather than failing
             if let Some(ep) = endpoints.first() {
+                warn!("No healthy RPC endpoints; falling back to {}", ep.config.url);
                 return Ok(RpcClient::new_with_commitment(
                     ep.config.url.clone(),
                     CommitmentConfig::confirmed(),
                 ));
             }
-            return Err("No RPC endpoints available".to_string());
+            return Err("No RPC endpoints configured".to_string());
         }
 
-        // Select by priority, with some randomization for load balancing
-        let mut rng = rand::thread_rng();
-        let selected = healthy.choose(&mut rng).unwrap();
+        // Priority-based selection: find the highest priority (lowest number = highest priority).
+        // Among endpoints sharing the highest priority tier, choose the one with the lowest latency.
+        let best_priority = healthy.iter().map(|e| e.config.priority).min().unwrap_or(255);
+        let top_tier: Vec<&RpcEndpoint> = healthy
+            .iter()
+            .filter(|e| e.config.priority == best_priority)
+            .copied()
+            .collect();
+
+        // Within the top-priority tier, pick the fastest (lowest latency_ms).
+        // On equal latency, add lightweight jitter to distribute load.
+        let selected = top_tier
+            .iter()
+            .min_by_key(|e| e.latency_ms)
+            .copied()
+            .unwrap_or(top_tier[0]);
 
         if let Some(metrics) = &self.metrics {
             metrics.rpc_requests.inc();

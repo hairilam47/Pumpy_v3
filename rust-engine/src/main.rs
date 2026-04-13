@@ -98,7 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("PumpFun client initialized: wallet={}", pumpfun_client.pubkey());
 
-    // Initialize MEV protector
+    // Initialize MEV protector + standalone JitoClient for OrderManager
+    let jito_client_opt: Option<Arc<crate::mev::JitoClient>> = config
+        .jito_bundle_url
+        .as_ref()
+        .map(|url| Arc::new(crate::mev::JitoClient::new(url.clone())));
+
     let mev_protector = Arc::new(MevProtector::new(
         config.jito_bundle_url.clone(),
         pumpfun_client.clone(),
@@ -124,8 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db_pool.clone(),
         pumpfun_client.clone(),
         mev_protector.clone(),
+        jito_client_opt,
         metrics.clone(),
         order_config,
+        config.trading.mev_protection_enabled,
     ));
     info!("Order manager initialized");
 

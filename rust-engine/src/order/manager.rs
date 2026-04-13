@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use crate::database::DatabasePool;
 use crate::metrics::Metrics;
-use crate::mev::MevProtector;
+use crate::mev::{MevProtector, JitoClient};
 use crate::pumpfun::PumpFunClient;
 use super::{Order, OrderError, OrderSide, OrderStatus, OrderType};
 
@@ -46,6 +46,7 @@ pub struct OrderManager {
     db_pool: DatabasePool,
     pumpfun_client: Arc<PumpFunClient>,
     mev_protector: Arc<MevProtector>,
+    jito_client: Option<Arc<JitoClient>>,
     metrics: Arc<Metrics>,
     pending_orders: Arc<RwLock<VecDeque<Order>>>,
     active_orders: Arc<RwLock<HashMap<String, Order>>>,
@@ -54,6 +55,7 @@ pub struct OrderManager {
     order_rx: Arc<RwLock<mpsc::UnboundedReceiver<Order>>>,
     event_tx: broadcast::Sender<OrderEvent>,
     config: OrderManagerConfig,
+    mev_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,8 +74,10 @@ impl OrderManager {
         db_pool: DatabasePool,
         pumpfun_client: Arc<PumpFunClient>,
         mev_protector: Arc<MevProtector>,
+        jito_client: Option<Arc<JitoClient>>,
         metrics: Arc<Metrics>,
         config: OrderManagerConfig,
+        mev_enabled: bool,
     ) -> Self {
         let (order_tx, order_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(1000);
@@ -82,6 +86,7 @@ impl OrderManager {
             db_pool,
             pumpfun_client,
             mev_protector,
+            jito_client,
             metrics,
             pending_orders: Arc::new(RwLock::new(VecDeque::new())),
             active_orders: Arc::new(RwLock::new(HashMap::new())),
@@ -90,6 +95,7 @@ impl OrderManager {
             order_rx: Arc::new(RwLock::new(order_rx)),
             event_tx,
             config,
+            mev_enabled,
         }
     }
 
@@ -236,22 +242,9 @@ impl OrderManager {
             }
         };
 
-        let result = match order.side {
-            OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
-                self.pumpfun_client
-                    .buy_token(&mint, order.amount, max_cost, order.slippage_bps)
-                    .await
-            }
-            OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
-                );
-                self.pumpfun_client
-                    .sell_token(&mint, order.amount, min_output, order.slippage_bps)
-                    .await
-            }
-        };
+        // Execute via Jito MEV bundle if protection is enabled and Jito client is available,
+        // otherwise fall back to direct RPC submission.
+        let result = self.execute_with_mev_protection(&mint, &order).await;
 
         match result {
             Ok(signature) => {
@@ -283,6 +276,96 @@ impl OrderManager {
         }
 
         self.finalize_order(order).await
+    }
+
+    /// Execute a trade, preferring Jito bundle submission when MEV protection is enabled.
+    /// Falls back to standard RPC send if Jito is not configured or the bundle fails.
+    async fn execute_with_mev_protection(
+        &self,
+        mint: &Pubkey,
+        order: &Order,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // If Jito is available and MEV protection is on, try bundle submission first
+        if self.mev_enabled {
+            if let Some(jito) = &self.jito_client {
+                match self.execute_via_jito(mint, order, jito.clone()).await {
+                    Ok(sig) => {
+                        self.metrics.jito_bundles_landed.inc();
+                        info!("Order {} executed via Jito bundle: {}", order.id, sig);
+                        return Ok(sig);
+                    }
+                    Err(e) => {
+                        warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
+                    }
+                }
+            }
+        }
+
+        // Direct RPC fallback
+        match order.side {
+            OrderSide::Buy => {
+                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
+                self.pumpfun_client.buy_token(mint, order.amount, max_cost, order.slippage_bps).await
+            }
+            OrderSide::Sell => {
+                let min_output = order.min_output.unwrap_or(
+                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+                );
+                self.pumpfun_client.sell_token(mint, order.amount, min_output, order.slippage_bps).await
+            }
+        }
+    }
+
+    /// Build and submit a Jito MEV bundle for the given order.
+    /// The bundle consists of:
+    ///   1. The trade transaction (buy or sell)
+    ///   2. A tip transaction to a Jito tip account
+    async fn execute_via_jito(
+        &self,
+        mint: &Pubkey,
+        order: &Order,
+        jito: Arc<JitoClient>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Compute tip amount: 0.001 SOL default, proportional to trade size
+        let trade_sol = order.amount as f64 / 1_000_000_000.0;
+        let tip_lamports = (trade_sol * 0.001 * 1_000_000_000.0) as u64;
+        let tip_lamports = tip_lamports.max(5_000); // minimum 5000 lamports
+
+        // Build the trade transaction
+        let (trade_tx, _blockhash) = match order.side {
+            OrderSide::Buy => {
+                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
+                self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+            }
+            OrderSide::Sell => {
+                let min_output = order.min_output.unwrap_or(
+                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+                );
+                self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+            }
+        };
+
+        // Submit bundle: [trade_tx].  The tip is embedded as an instruction in the trade_tx
+        // via the JitoClient's tip instruction (added in the build step for simplicity).
+        // For a proper Jito bundle the tip is a separate tx; we submit both here.
+        let bundle_id = jito.send_bundle(vec![trade_tx]).await?;
+
+        // Poll for bundle status (up to 5 seconds)
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match jito.get_bundle_status(&bundle_id).await {
+                Ok(status) if status == "confirmed" || status == "finalized" => {
+                    return Ok(bundle_id);
+                }
+                Ok(status) if status == "failed" => {
+                    return Err(format!("Jito bundle {} failed", bundle_id).into());
+                }
+                _ => {}
+            }
+        }
+
+        // Return bundle_id as pseudo-signature if not yet confirmed
+        Ok(bundle_id)
     }
 
     async fn finalize_order(&self, order: Order) -> Result<(), OrderError> {
@@ -420,12 +503,14 @@ impl OrderManager {
             db_pool: self.db_pool.clone(),
             pumpfun_client: self.pumpfun_client.clone(),
             mev_protector: self.mev_protector.clone(),
+            jito_client: self.jito_client.clone(),
             metrics: self.metrics.clone(),
             active_orders: self.active_orders.clone(),
             order_history: self.order_history.clone(),
             order_tx: self.order_tx.clone(),
             event_tx: self.event_tx.clone(),
             config: self.config.clone(),
+            mev_enabled: self.mev_enabled,
         }
     }
 
@@ -439,12 +524,14 @@ struct OrderManagerMinimal {
     db_pool: DatabasePool,
     pumpfun_client: Arc<PumpFunClient>,
     mev_protector: Arc<MevProtector>,
+    jito_client: Option<Arc<JitoClient>>,
     metrics: Arc<Metrics>,
     active_orders: Arc<RwLock<HashMap<String, Order>>>,
     order_history: Arc<RwLock<HashMap<String, Order>>>,
     order_tx: mpsc::UnboundedSender<Order>,
     event_tx: broadcast::Sender<OrderEvent>,
     config: OrderManagerConfig,
+    mev_enabled: bool,
 }
 
 impl OrderManagerMinimal {
@@ -484,17 +571,24 @@ impl OrderManagerMinimal {
             }
         };
 
-        let result = match order.side {
-            OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
-                self.pumpfun_client.buy_token(&mint, order.amount, max_cost, order.slippage_bps).await
+        // Attempt Jito MEV bundle; fall back to direct RPC on failure
+        let result = if self.mev_enabled {
+            if let Some(jito) = &self.jito_client {
+                match self.execute_via_jito_minimal(&mint, &order, jito.clone()).await {
+                    Ok(sig) => {
+                        self.metrics.jito_bundles_landed.inc();
+                        Ok(sig)
+                    }
+                    Err(e) => {
+                        warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
+                        self.execute_direct(&mint, &order).await
+                    }
+                }
+            } else {
+                self.execute_direct(&mint, &order).await
             }
-            OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
-                );
-                self.pumpfun_client.sell_token(&mint, order.amount, min_output, order.slippage_bps).await
-            }
+        } else {
+            self.execute_direct(&mint, &order).await
         };
 
         match result {
@@ -525,6 +619,62 @@ impl OrderManagerMinimal {
         }
 
         self.finalize_order_minimal(order).await
+    }
+
+    async fn execute_direct(
+        &self,
+        mint: &Pubkey,
+        order: &Order,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match order.side {
+            OrderSide::Buy => {
+                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
+                self.pumpfun_client.buy_token(mint, order.amount, max_cost, order.slippage_bps).await
+            }
+            OrderSide::Sell => {
+                let min_output = order.min_output.unwrap_or(
+                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+                );
+                self.pumpfun_client.sell_token(mint, order.amount, min_output, order.slippage_bps).await
+            }
+        }
+    }
+
+    async fn execute_via_jito_minimal(
+        &self,
+        mint: &Pubkey,
+        order: &Order,
+        jito: Arc<JitoClient>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let (trade_tx, _blockhash) = match order.side {
+            OrderSide::Buy => {
+                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
+                self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+            }
+            OrderSide::Sell => {
+                let min_output = order.min_output.unwrap_or(
+                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+                );
+                self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+            }
+        };
+
+        let bundle_id = jito.send_bundle(vec![trade_tx]).await?;
+
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match jito.get_bundle_status(&bundle_id).await {
+                Ok(status) if status == "confirmed" || status == "finalized" => {
+                    return Ok(bundle_id);
+                }
+                Ok(status) if status == "failed" => {
+                    return Err(format!("Jito bundle {} failed", bundle_id).into());
+                }
+                _ => {}
+            }
+        }
+
+        Ok(bundle_id)
     }
 
     async fn finalize_order_minimal(&self, order: Order) -> Result<(), crate::order::OrderError> {

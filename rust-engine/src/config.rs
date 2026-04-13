@@ -55,16 +55,56 @@ pub struct MonitoringConfig {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let rpc_url = env::var("SOLANA_RPC_URL")
-            .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
-        let ws_url = env::var("SOLANA_WS_URL").ok();
+        // Support multiple RPC endpoints via comma-separated env vars:
+        //   SOLANA_RPC_URLS=https://mainnet.helius-rpc.com/?api-key=X,https://solana-api.projectserum.com
+        //   SOLANA_WS_URLS=wss://mainnet.helius-rpc.com/?api-key=X,wss://...  (optional, one per RPC)
+        //   RPC_PRIORITIES=1,2  (optional, one per RPC; lower = higher priority)
+        // Falls back to single SOLANA_RPC_URL / SOLANA_WS_URL if not set.
+        let rpc_endpoints = {
+            let urls: Vec<String> = env::var("SOLANA_RPC_URLS")
+                .ok()
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_else(|| {
+                    vec![env::var("SOLANA_RPC_URL")
+                        .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())]
+                });
 
-        let rpc_endpoints = vec![RpcEndpointConfig {
-            url: rpc_url,
-            provider: env::var("RPC_PROVIDER").unwrap_or_else(|_| "public".to_string()),
-            priority: 1,
-            ws_url,
-        }];
+            let ws_urls: Vec<Option<String>> = env::var("SOLANA_WS_URLS")
+                .ok()
+                .map(|v| v.split(',').map(|s| {
+                    let s = s.trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                }).collect())
+                .unwrap_or_else(|| {
+                    vec![env::var("SOLANA_WS_URL").ok()]
+                });
+
+            let priorities: Vec<u8> = env::var("RPC_PRIORITIES")
+                .ok()
+                .map(|v| v.split(',').enumerate().map(|(i, s)| {
+                    s.trim().parse::<u8>().unwrap_or((i + 1) as u8)
+                }).collect())
+                .unwrap_or_else(|| (1..=urls.len()).map(|i| i as u8).collect());
+
+            let provider_names: Vec<String> = env::var("RPC_PROVIDERS")
+                .ok()
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_else(|| {
+                    urls.iter().map(|u| {
+                        if u.contains("helius") { "helius".to_string() }
+                        else if u.contains("quicknode") { "quicknode".to_string() }
+                        else if u.contains("alchemy") { "alchemy".to_string() }
+                        else { "public".to_string() }
+                    }).collect()
+                });
+
+            urls.into_iter().enumerate().map(|(i, url)| RpcEndpointConfig {
+                url,
+                provider: provider_names.get(i).cloned().unwrap_or_else(|| format!("provider-{}", i + 1)),
+                priority: priorities.get(i).copied().unwrap_or((i + 1) as u8),
+                ws_url: ws_urls.get(i).and_then(|v| v.clone()),
+            }).collect::<Vec<_>>()
+        };
 
         Ok(Self {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),

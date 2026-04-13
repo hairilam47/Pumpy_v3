@@ -2,12 +2,13 @@ pub mod jito;
 pub mod mempool;
 pub mod sandwich;
 
+pub use jito::JitoClient;
+
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::metrics::Metrics;
 use crate::pumpfun::PumpFunClient;
-use self::jito::JitoClient;
 use self::mempool::MempoolMonitor;
 use self::sandwich::{SandwichDetector, SandwichRiskAnalysis};
 
