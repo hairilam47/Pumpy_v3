@@ -410,7 +410,7 @@ router.get("/bot/status", async (_req: Request, res: Response) => {
     }
 
     res.json({
-      running: rustConnected || pyConnected,
+      running: activeStrategies.length > 0,
       rustEngineConnected: rustConnected,
       pythonEngineRunning: pyConnected,
       walletAddress: process.env.WALLET_ADDRESS ?? "",
