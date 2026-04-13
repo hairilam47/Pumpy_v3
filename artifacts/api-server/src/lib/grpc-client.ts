@@ -131,16 +131,6 @@ export const grpcBot = {
     return callUnary<PortfolioSummaryResponse>("GetPortfolioSummary", {});
   },
 
-  async getMevStats(): Promise<{
-    bundlesSubmitted: number;
-    bundlesLanded: number;
-    landedRate: number;
-    mevSavedSol: number;
-    jitoEnabled: boolean;
-  }> {
-    return callUnary("GetMevStats", {});
-  },
-
   /**
    * Open a server-streaming RPC for order updates.
    * Calls `onUpdate` for each OrderUpdate received.

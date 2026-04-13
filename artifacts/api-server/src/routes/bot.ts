@@ -410,17 +410,37 @@ router.get("/bot/status", async (_req: Request, res: Response) => {
 
 router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
   try {
-    const grpcData = await grpcBot.getMevStats().catch(() => null);
-    if (grpcData) {
-      res.json(grpcData);
+    // Derive MEV stats from the Python metrics endpoint (which aggregates gRPC engine data)
+    const pyMetrics = await fetchPython("/api/metrics") as Record<string, unknown> | null;
+    const jitoEnabled = !!process.env.JITO_BUNDLE_URL;
+
+    if (pyMetrics) {
+      const submitted = Number(pyMetrics.jitoLanded ?? pyMetrics.bundles_submitted ?? 0);
+      const landed = Number(pyMetrics.jitoLanded ?? pyMetrics.bundles_landed ?? 0);
+      // jito_landed is bundles that successfully landed; submitted ≥ landed
+      const bundlesSubmitted = Number(pyMetrics.bundles_submitted ?? pyMetrics.jitoLanded ?? 0);
+      const bundlesLanded = Number(pyMetrics.bundles_landed ?? pyMetrics.jitoLanded ?? 0);
+      const landedRate = bundlesSubmitted > 0 ? (bundlesLanded / bundlesSubmitted) * 100 : 0;
+      const mevSavedSol = Number(pyMetrics.mev_saved_sol ?? pyMetrics.mevSavedSol ?? 0);
+
+      res.json({
+        bundlesSubmitted,
+        bundlesLanded,
+        landedRate,
+        mevSavedSol,
+        jitoEnabled: jitoEnabled || bundlesSubmitted > 0,
+      });
       return;
     }
+
+    // No engine data at all — return zeros but indicate live connectivity status
     res.json({
       bundlesSubmitted: 0,
       bundlesLanded: 0,
       landedRate: 0,
       mevSavedSol: 0,
-      jitoEnabled: !!process.env.JITO_BUNDLE_URL,
+      jitoEnabled,
+      _source: "no-engine",
     });
   } catch {
     res.status(500).json({ error: "Failed to get MEV stats" });
@@ -431,8 +451,22 @@ router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
 
 router.post("/bot/start", async (_req: Request, res: Response) => {
   try {
-    const pyResult = await fetchPython("/api/strategies", { method: "POST" }).catch(() => null);
-    res.json({ success: true, message: "Bot start requested", detail: pyResult });
+    // Activate all strategies via Python engine
+    const strategies = ["sniper", "momentum"] as const;
+    const results = await Promise.allSettled(
+      strategies.map((name) =>
+        fetchPython(`/api/strategy/activate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_name: name, active: true }),
+        }).catch(() => null)
+      )
+    );
+    const anySuccess = results.some((r) => r.status === "fulfilled");
+    res.json({
+      success: anySuccess,
+      message: anySuccess ? "Strategies activated" : "Could not contact Python engine — start the engine first",
+    });
   } catch {
     res.json({ success: false, message: "Start request failed" });
   }
@@ -440,7 +474,22 @@ router.post("/bot/start", async (_req: Request, res: Response) => {
 
 router.post("/bot/stop", async (_req: Request, res: Response) => {
   try {
-    res.json({ success: true, message: "Bot stop requested — restart the service to fully stop" });
+    // Deactivate all strategies via Python engine
+    const strategies = ["sniper", "momentum"] as const;
+    const results = await Promise.allSettled(
+      strategies.map((name) =>
+        fetchPython(`/api/strategy/activate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_name: name, active: false }),
+        }).catch(() => null)
+      )
+    );
+    const anySuccess = results.some((r) => r.status === "fulfilled");
+    res.json({
+      success: anySuccess,
+      message: anySuccess ? "Strategies deactivated" : "Could not contact Python engine — engine may already be stopped",
+    });
   } catch {
     res.json({ success: false, message: "Stop request failed" });
   }

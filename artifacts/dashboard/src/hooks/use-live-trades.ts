@@ -53,10 +53,11 @@ export function useLiveTrades(): UseliveTrades {
         if (!mounted.current) return;
         try {
           const update = JSON.parse(evt.data) as Partial<LiveTrade>;
-          if (!update.id && !update.mint) return;
+          // Require at minimum an id (normalized from gRPC order_id)
+          if (!update.id) return;
 
           const trade: LiveTrade = {
-            id: update.id ?? crypto.randomUUID(),
+            id: update.id,
             mint: update.mint ?? "",
             tokenName: update.tokenName,
             tokenSymbol: update.tokenSymbol,

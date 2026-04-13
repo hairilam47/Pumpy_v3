@@ -66,11 +66,11 @@ export default function DashboardPage() {
 
   const startBot = useMutation({
     mutationFn: () => botControl("start"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["getBotStatus"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/bot/status"] }),
   });
   const stopBot = useMutation({
     mutationFn: () => botControl("stop"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["getBotStatus"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/bot/status"] }),
   });
 
   const ctrlPending = startBot.isPending || stopBot.isPending;

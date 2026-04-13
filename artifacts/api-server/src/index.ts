@@ -34,7 +34,21 @@ wss.on("connection", (ws: WebSocket, orderIds: string[]) => {
         ids,
         (update) => {
           if (ws.readyState === ws.OPEN) {
-            ws.send(JSON.stringify(update));
+            // Normalize snake_case gRPC fields to camelCase for the browser
+            const normalized = {
+              id: update.order_id,
+              mint: update.token_mint ?? "",
+              status: update.status,
+              signature: update.signature,
+              error: update.error,
+              executedAt: update.executed_at,
+              executedPrice: update.executed_price,
+              amountSol: update.executed_amount != null
+                ? Number(update.executed_amount) / 1e9
+                : undefined,
+              createdAt: new Date().toISOString(),
+            };
+            ws.send(JSON.stringify(normalized));
           }
         },
         (err) => {
