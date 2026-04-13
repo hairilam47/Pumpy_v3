@@ -51,8 +51,6 @@ class StrategyEngine:
         self.tracked_tokens: Dict[str, TokenMarketData] = {}
         self.running = False
         self._scan_task: Optional[asyncio.Task] = None
-        self._order_stream_task: Optional[asyncio.Task] = None
-        self._collector_task: Optional[asyncio.Task] = None
         self.data_collector = PumpFunDataCollector(self.grpc_client)
         self.data_collector.register_callback(self._on_token_event)
 
@@ -70,8 +68,6 @@ class StrategyEngine:
         await self.grpc_client.connect()
 
         self._scan_task = asyncio.create_task(self._market_scan_loop())
-        self._order_stream_task = asyncio.create_task(self._order_stream_loop())
-
         await self.data_collector.start()
 
         logger.info("Strategy engine started", strategies=[s.name for s in self.strategies])
@@ -82,8 +78,6 @@ class StrategyEngine:
 
         if self._scan_task:
             self._scan_task.cancel()
-        if self._order_stream_task:
-            self._order_stream_task.cancel()
 
         await self.data_collector.stop()
         await self.grpc_client.disconnect()
@@ -111,22 +105,6 @@ class StrategyEngine:
             except Exception as e:
                 logger.error("Market scan error", error=str(e))
             await asyncio.sleep(settings.market_scan_interval_seconds)
-
-    async def _order_stream_loop(self):
-        while self.running:
-            try:
-                async for update in self.grpc_client.stream_orders():
-                    logger.info(
-                        "Order update",
-                        order_id=update.get("order_id"),
-                        status=update.get("status"),
-                        signature=update.get("signature"),
-                    )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning("Order stream error, retrying", error=str(e))
-                await asyncio.sleep(5)
 
     async def _run_strategies(self):
         if not self.tracked_tokens:

@@ -8,6 +8,12 @@ from config import settings
 
 logger = structlog.get_logger(__name__)
 
+_FATAL_GRPC_CODES = frozenset({
+    grpc.StatusCode.UNAVAILABLE,
+    grpc.StatusCode.DEADLINE_EXCEEDED,
+    grpc.StatusCode.INTERNAL,
+})
+
 
 class BotGrpcClient:
     """gRPC client for communicating with the Rust trading engine."""
@@ -78,6 +84,24 @@ class BotGrpcClient:
             else:
                 delay = 5.0
 
+    def _on_rpc_error(self, exc: grpc.RpcError):
+        """
+        Called on any gRPC RpcError.  Marks the channel as disconnected when the
+        error code indicates the connection is broken, so the reconnect loop can
+        quickly re-probe rather than waiting for the next probe interval.
+        """
+        try:
+            code = exc.code()
+        except Exception:
+            code = None
+        if code in _FATAL_GRPC_CODES:
+            if self._connected:
+                self._connected = False
+                logger.warning(
+                    "gRPC channel marked disconnected after fatal error",
+                    code=str(code),
+                )
+
     async def disconnect(self):
         """Close the gRPC channel and stop the reconnect loop."""
         self._stopped = True
@@ -136,6 +160,7 @@ class BotGrpcClient:
                 "message": response.message,
             }
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC SubmitOrder error", error=str(e))
             raise
 
@@ -148,6 +173,7 @@ class BotGrpcClient:
             response = await self.stub.CancelOrder(request, timeout=5.0)
             return {"success": response.success, "message": response.message}
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC CancelOrder error", error=str(e))
             return {"success": False, "message": str(e)}
 
@@ -166,6 +192,7 @@ class BotGrpcClient:
                 "executed_at": response.executed_at,
             }
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC GetOrderStatus error", error=str(e))
             return {"order_id": order_id, "status": "ERROR", "error": str(e)}
 
@@ -188,6 +215,7 @@ class BotGrpcClient:
                 "bonding_curve_progress": response.bonding_curve_progress,
             }
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC GetTokenInfo error", error=str(e))
             return {}
 
@@ -208,6 +236,7 @@ class BotGrpcClient:
                 "win_rate": response.win_rate,
             }
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC GetPortfolioSummary error", error=str(e))
             return self._mock_portfolio()
 
@@ -229,6 +258,7 @@ class BotGrpcClient:
                     "executed_amount": update.executed_amount,
                 }
         except grpc.RpcError as e:
+            self._on_rpc_error(e)
             logger.error("gRPC StreamOrders error", error=str(e))
 
     def _mock_portfolio(self) -> Dict:
