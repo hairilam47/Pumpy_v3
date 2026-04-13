@@ -3,6 +3,15 @@ import { CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server, Settings
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
+interface EnvVar {
+  key: string;
+  required: boolean;
+  description: string;
+  setIn: string;
+  set: boolean;
+  masked: string;
+}
+
 interface SettingsStatus {
   wallet: {
     pubkey: string | null;
@@ -15,11 +24,7 @@ interface SettingsStatus {
     latencyMs: number | null;
     online: boolean;
   };
-  envVars: Array<{
-    key: string;
-    set: boolean;
-    masked: string;
-  }>;
+  envVars: EnvVar[];
 }
 
 function useSettingsStatus() {
@@ -45,7 +50,12 @@ function StatusIcon({ ok }: { ok: boolean }) {
 
 function LatencyBadge({ ms }: { ms: number | null }) {
   if (ms === null) return <Badge variant="destructive" className="text-xs">Offline</Badge>;
-  const color = ms < 200 ? "bg-green-500/15 text-green-400" : ms < 600 ? "bg-yellow-500/15 text-yellow-400" : "bg-red-500/15 text-red-400";
+  const color =
+    ms < 200
+      ? "bg-green-500/15 text-green-400"
+      : ms < 600
+      ? "bg-yellow-500/15 text-yellow-400"
+      : "bg-red-500/15 text-red-400";
   return (
     <span className={`text-xs font-mono px-2 py-0.5 rounded ${color}`}>
       {ms} ms
@@ -56,9 +66,7 @@ function LatencyBadge({ ms }: { ms: number | null }) {
 export default function SettingsPage() {
   const { data, isLoading, error, dataUpdatedAt } = useSettingsStatus();
 
-  const lastUpdated = dataUpdatedAt
-    ? new Date(dataUpdatedAt).toLocaleTimeString()
-    : null;
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null;
 
   return (
     <div className="space-y-6">
@@ -70,7 +78,7 @@ export default function SettingsPage() {
             Settings &amp; Configuration
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Read-only view of environment configuration — no secrets are exposed.
+            Read-only view of environment configuration — no secrets are ever exposed.
           </p>
         </div>
         {lastUpdated && (
@@ -81,18 +89,20 @@ export default function SettingsPage() {
       </div>
 
       {isLoading && (
-        <div className="text-sm text-muted-foreground animate-pulse">Loading configuration status…</div>
+        <div className="text-sm text-muted-foreground animate-pulse">
+          Loading configuration status…
+        </div>
       )}
       {error && (
         <div className="flex items-center gap-2 text-sm text-destructive">
           <AlertCircle className="w-4 h-4" />
-          Failed to load settings status — API server may be offline.
+          Failed to load settings — API server may be offline.
         </div>
       )}
 
       {data && (
         <>
-          {/* Wallet Section */}
+          {/* Wallet */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -109,7 +119,8 @@ export default function SettingsPage() {
                   </div>
                   {data.wallet.source && (
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      Source: <span className="font-mono">{data.wallet.source}</span>
+                      Source:{" "}
+                      <span className="font-mono">{data.wallet.source}</span>
                     </div>
                   )}
                 </div>
@@ -129,12 +140,16 @@ export default function SettingsPage() {
                 </div>
               ) : data.wallet.configured ? (
                 <div className="rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  Public key derived from WALLET_PRIVATE_KEY when set as a JSON byte array.
+                  Public key is available when the Rust engine starts, or when{" "}
+                  <span className="font-mono">WALLET_PRIVATE_KEY</span> is set as a
+                  JSON byte array.
                 </div>
               ) : (
                 <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON array) or{" "}
-                  <span className="font-mono">KEYPAIR_PATH</span> (path to keypair JSON file).
+                  Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON
+                  array) in the{" "}
+                  <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
+                  <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
                 </div>
               )}
             </CardContent>
@@ -157,7 +172,9 @@ export default function SettingsPage() {
                 <StatusIcon ok={data.rpc.configured} />
                 <div className="flex-1">
                   <div className="text-sm font-medium text-foreground">
-                    {data.rpc.configured ? "RPC endpoint configured" : "No RPC endpoint configured"}
+                    {data.rpc.configured
+                      ? "RPC endpoint configured"
+                      : "No RPC endpoint configured"}
                   </div>
                   {data.rpc.url && (
                     <div className="text-xs text-muted-foreground font-mono mt-0.5 truncate max-w-xs">
@@ -170,8 +187,10 @@ export default function SettingsPage() {
 
               {!data.rpc.configured && (
                 <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Set <span className="font-mono">SOLANA_RPC_URL</span> or{" "}
-                  <span className="font-mono">SOLANA_RPC_URLS</span> (comma-separated for failover).
+                  Set <span className="font-mono">SOLANA_RPC_URL</span> in the{" "}
+                  <span className="font-semibold">Replit Secrets panel</span>.{" "}
+                  For multi-endpoint failover use{" "}
+                  <span className="font-mono">SOLANA_RPC_URLS</span> (comma-separated).
                 </div>
               )}
 
@@ -179,7 +198,11 @@ export default function SettingsPage() {
                 <div className="grid grid-cols-3 gap-3">
                   <div className="rounded-lg bg-muted/40 px-3 py-2 text-center">
                     <div className="text-xs text-muted-foreground">Status</div>
-                    <div className={`text-sm font-semibold mt-0.5 ${data.rpc.online ? "text-green-400" : "text-red-400"}`}>
+                    <div
+                      className={`text-sm font-semibold mt-0.5 ${
+                        data.rpc.online ? "text-green-400" : "text-red-400"
+                      }`}
+                    >
                       {data.rpc.online ? "Online" : "Offline"}
                     </div>
                   </div>
@@ -191,9 +214,7 @@ export default function SettingsPage() {
                   </div>
                   <div className="rounded-lg bg-muted/40 px-3 py-2 text-center">
                     <div className="text-xs text-muted-foreground">Protocol</div>
-                    <div className="text-sm font-semibold mt-0.5">
-                      JSON-RPC
-                    </div>
+                    <div className="text-sm font-semibold mt-0.5">JSON-RPC</div>
                   </div>
                 </div>
               )}
@@ -213,30 +234,67 @@ export default function SettingsPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-muted/50">
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide w-8"></th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Variable</th>
-                      <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Value</th>
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide w-8" />
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Variable
+                      </th>
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden md:table-cell">
+                        Required
+                      </th>
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden lg:table-cell">
+                        Purpose
+                      </th>
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden lg:table-cell">
+                        Where to set
+                      </th>
+                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Value
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.envVars.map((v, i) => (
                       <tr
                         key={v.key}
-                        className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/20"}`}
+                        className={`border-t border-border ${
+                          i % 2 === 0 ? "" : "bg-muted/20"
+                        }`}
                       >
-                        <td className="px-4 py-2.5">
+                        <td className="px-3 py-2.5">
                           <StatusIcon ok={v.set} />
                         </td>
-                        <td className="px-4 py-2.5">
-                          <span className="font-mono text-xs text-foreground">{v.key}</span>
+                        <td className="px-3 py-2.5">
+                          <span className="font-mono text-xs text-foreground">
+                            {v.key}
+                          </span>
                         </td>
-                        <td className="px-4 py-2.5">
+                        <td className="px-3 py-2.5 hidden md:table-cell">
+                          <Badge
+                            variant={v.required ? "default" : "secondary"}
+                            className="text-xs"
+                          >
+                            {v.required ? "Required" : "Optional"}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2.5 hidden lg:table-cell max-w-xs">
+                          <span className="text-xs text-muted-foreground leading-tight">
+                            {v.description}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 hidden lg:table-cell">
+                          <span className="text-xs text-muted-foreground/70 italic">
+                            {v.setIn}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5">
                           {v.set ? (
                             <span className="font-mono text-xs text-muted-foreground">
                               {v.masked || "****"}
                             </span>
                           ) : (
-                            <span className="text-xs text-muted-foreground/50 italic">not set</span>
+                            <span className="text-xs text-muted-foreground/40 italic">
+                              not set
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -245,7 +303,7 @@ export default function SettingsPage() {
                 </table>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Private keys and secrets are never exposed — only their presence is shown.
+                Private keys and connection strings are never exposed — only their presence is confirmed.
               </p>
             </CardContent>
           </Card>

@@ -1,6 +1,9 @@
 import { Router } from "express";
+import { readFileSync } from "fs";
 
 const router = Router();
+
+// ── Base58 helpers (no external deps) ────────────────────────────────────────
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -50,6 +53,24 @@ function base58Decode(str: string): Uint8Array {
   return new Uint8Array(bytes.reverse());
 }
 
+// ── Pubkey extraction ─────────────────────────────────────────────────────────
+
+/**
+ * Extract the 32-byte public key from a 64-byte Solana keypair buffer
+ * and return it as a base58 string. Returns null on any parse failure.
+ */
+function pubkeyFromKeypairBytes(bytes: Uint8Array): string | null {
+  if (bytes.length !== 64) return null;
+  return base58Encode(bytes.slice(32, 64));
+}
+
+/**
+ * Derive the wallet public key from whichever source is configured.
+ *
+ * Priority:
+ *   1. WALLET_PRIVATE_KEY — JSON array or base58 string
+ *   2. KEYPAIR_PATH       — JSON file on disk
+ */
 function deriveWalletPubkey(): { pubkey: string | null; source: string | null } {
   const rawKey = process.env.WALLET_PRIVATE_KEY;
   if (rawKey) {
@@ -57,24 +78,31 @@ function deriveWalletPubkey(): { pubkey: string | null; source: string | null } 
       const trimmed = rawKey.trim();
       let bytes: Uint8Array;
       if (trimmed.startsWith("[")) {
-        const arr: number[] = JSON.parse(trimmed);
-        bytes = new Uint8Array(arr);
+        bytes = new Uint8Array(JSON.parse(trimmed) as number[]);
       } else {
         bytes = base58Decode(trimmed);
       }
-      if (bytes.length === 64) {
-        const pubkeyBytes = bytes.slice(32, 64);
-        return { pubkey: base58Encode(pubkeyBytes), source: "WALLET_PRIVATE_KEY" };
-      }
+      return { pubkey: pubkeyFromKeypairBytes(bytes), source: "WALLET_PRIVATE_KEY" };
     } catch {
+      return { pubkey: null, source: "WALLET_PRIVATE_KEY" };
     }
-    return { pubkey: null, source: "WALLET_PRIVATE_KEY" };
   }
-  if (process.env.KEYPAIR_PATH) {
-    return { pubkey: null, source: "KEYPAIR_PATH" };
+
+  const keypairPath = process.env.KEYPAIR_PATH;
+  if (keypairPath) {
+    try {
+      const raw = readFileSync(keypairPath, "utf8").trim();
+      const bytes = new Uint8Array(JSON.parse(raw) as number[]);
+      return { pubkey: pubkeyFromKeypairBytes(bytes), source: "KEYPAIR_PATH" };
+    } catch {
+      return { pubkey: null, source: "KEYPAIR_PATH" };
+    }
   }
+
   return { pubkey: null, source: null };
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function maskString(val: string | undefined): string {
   if (!val) return "";
@@ -88,11 +116,7 @@ async function pingRpc(url: string): Promise<number | null> {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "getHealth",
-      }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
@@ -102,31 +126,127 @@ async function pingRpc(url: string): Promise<number | null> {
   }
 }
 
+// ── Env-var catalogue ─────────────────────────────────────────────────────────
+
+interface EnvVarDef {
+  key: string;
+  required: boolean;
+  description: string;
+  setIn: string;
+}
+
+const ENV_VAR_DEFS: EnvVarDef[] = [
+  {
+    key: "SOLANA_RPC_URL",
+    required: true,
+    description: "Solana JSON-RPC endpoint (e.g. your Helius / QuickNode URL).",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "SOLANA_RPC_URLS",
+    required: false,
+    description: "Comma-separated RPC endpoints for automatic failover. Used only when SOLANA_RPC_URL is not set.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "WALLET_PRIVATE_KEY",
+    required: true,
+    description: "Wallet private key as a base58 string or JSON byte array (64 bytes). Preferred over KEYPAIR_PATH.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "KEYPAIR_PATH",
+    required: false,
+    description: "Path to a Solana keypair JSON file on disk. Used only when WALLET_PRIVATE_KEY is not set.",
+    setIn: "Replit Files panel — upload the file, then set the path here",
+  },
+  {
+    key: "DATABASE_URL",
+    required: true,
+    description: "PostgreSQL connection string. Auto-provided when you attach a Replit database.",
+    setIn: "Replit Database tab (auto-injected)",
+  },
+  {
+    key: "JITO_BUNDLE_URL",
+    required: false,
+    description: "Jito MEV bundle submission endpoint. Enables front-running protection via Jito.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "PYTHON_STRATEGY_URL",
+    required: false,
+    description: "URL of the Python strategy engine. Defaults to http://localhost:8001.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "RUST_GRPC_URL",
+    required: false,
+    description: "gRPC address of the Rust trading engine. Defaults to localhost:50051.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "GRPC_PORT",
+    required: false,
+    description: "Port the Rust gRPC server listens on (default: 50051).",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "METRICS_PORT",
+    required: false,
+    description: "Port for the Prometheus /metrics endpoint (default: 9091).",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "MAX_POSITION_SIZE_SOL",
+    required: false,
+    description: "Maximum SOL amount allowed per individual trade position.",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "STOP_LOSS_PERCENT",
+    required: false,
+    description: "Stop-loss exit threshold as a percentage (e.g. 10 = exit at −10%).",
+    setIn: "Replit Secrets panel",
+  },
+  {
+    key: "TAKE_PROFIT_PERCENT",
+    required: false,
+    description: "Take-profit exit threshold as a percentage (e.g. 50 = exit at +50%).",
+    setIn: "Replit Secrets panel",
+  },
+];
+
+// ── Route ─────────────────────────────────────────────────────────────────────
+
 router.get("/settings/status", async (_req, res) => {
   const walletInfo = deriveWalletPubkey();
 
+  // SOLANA_RPC_URL is the canonical simple path; SOLANA_RPC_URLS is the advanced failover list.
   const rpcUrl =
-    process.env.SOLANA_RPC_URLS?.split(",")[0]?.trim() ||
     process.env.SOLANA_RPC_URL ||
+    process.env.SOLANA_RPC_URLS?.split(",")[0]?.trim() ||
     null;
 
   const rpcLatencyMs = rpcUrl ? await pingRpc(rpcUrl) : null;
 
-  const envVars = [
-    { key: "SOLANA_RPC_URL", set: !!process.env.SOLANA_RPC_URL, masked: maskString(process.env.SOLANA_RPC_URL) },
-    { key: "SOLANA_RPC_URLS", set: !!process.env.SOLANA_RPC_URLS, masked: maskString(process.env.SOLANA_RPC_URLS) },
-    { key: "WALLET_PRIVATE_KEY", set: !!process.env.WALLET_PRIVATE_KEY, masked: process.env.WALLET_PRIVATE_KEY ? "****" : "" },
-    { key: "KEYPAIR_PATH", set: !!process.env.KEYPAIR_PATH, masked: maskString(process.env.KEYPAIR_PATH) },
-    { key: "DATABASE_URL", set: !!process.env.DATABASE_URL, masked: process.env.DATABASE_URL ? "****" : "" },
-    { key: "JITO_BUNDLE_URL", set: !!process.env.JITO_BUNDLE_URL, masked: maskString(process.env.JITO_BUNDLE_URL) },
-    { key: "PYTHON_STRATEGY_URL", set: !!process.env.PYTHON_STRATEGY_URL, masked: maskString(process.env.PYTHON_STRATEGY_URL) },
-    { key: "RUST_GRPC_URL", set: !!process.env.RUST_GRPC_URL, masked: maskString(process.env.RUST_GRPC_URL) },
-    { key: "GRPC_PORT", set: !!process.env.GRPC_PORT, masked: process.env.GRPC_PORT || "" },
-    { key: "METRICS_PORT", set: !!process.env.METRICS_PORT, masked: process.env.METRICS_PORT || "" },
-    { key: "MAX_POSITION_SIZE_SOL", set: !!process.env.MAX_POSITION_SIZE_SOL, masked: process.env.MAX_POSITION_SIZE_SOL || "" },
-    { key: "STOP_LOSS_PERCENT", set: !!process.env.STOP_LOSS_PERCENT, masked: process.env.STOP_LOSS_PERCENT || "" },
-    { key: "TAKE_PROFIT_PERCENT", set: !!process.env.TAKE_PROFIT_PERCENT, masked: process.env.TAKE_PROFIT_PERCENT || "" },
-  ];
+  const envVars = ENV_VAR_DEFS.map((def) => {
+    const rawVal = process.env[def.key];
+    const isSecret =
+      def.key === "WALLET_PRIVATE_KEY" ||
+      def.key === "DATABASE_URL";
+    return {
+      key: def.key,
+      required: def.required,
+      description: def.description,
+      setIn: def.setIn,
+      set: !!rawVal,
+      masked: rawVal
+        ? isSecret
+          ? "****"
+          : maskString(rawVal)
+        : "",
+    };
+  });
 
   res.json({
     wallet: {
