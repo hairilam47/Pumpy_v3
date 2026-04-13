@@ -1,10 +1,9 @@
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path from "path";
-import { fileURLToPath } from "url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROTO_PATH = path.join(__dirname, "..", "bot.proto");
+const PROTO_PATH = process.env.PROTO_PATH
+  ?? path.resolve(process.cwd(), "..", "..", "rust-engine", "proto", "bot.proto");
 
 const GRPC_HOST = process.env.GRPC_HOST ?? "localhost";
 const GRPC_PORT = process.env.GRPC_PORT ?? "50051";
@@ -130,6 +129,16 @@ export const grpcBot = {
 
   async getPortfolioSummary(): Promise<PortfolioSummaryResponse> {
     return callUnary<PortfolioSummaryResponse>("GetPortfolioSummary", {});
+  },
+
+  async getMevStats(): Promise<{
+    bundlesSubmitted: number;
+    bundlesLanded: number;
+    landedRate: number;
+    mevSavedSol: number;
+    jitoEnabled: boolean;
+  }> {
+    return callUnary("GetMevStats", {});
   },
 
   /**

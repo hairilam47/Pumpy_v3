@@ -26,33 +26,38 @@ const wss = new WebSocketServer({ noServer: true });
 wss.on("connection", (ws: WebSocket, orderIds: string[]) => {
   logger.info({ orderIds }, "WS client connected to /api/bot/stream");
 
-  // Fan messages from gRPC streaming RPC to the WS client
   let cancelGrpc: (() => void) | null = null;
 
   function startStream(ids: string[]) {
-    cancelGrpc = grpcBot.streamOrders(
-      ids,
-      (update) => {
-        if (ws.readyState === ws.OPEN) {
-          ws.send(JSON.stringify(update));
-        }
-      },
-      (err) => {
-        if (err) {
-          logger.warn({ err }, "gRPC stream ended with error, retrying in 2s");
-          // Retry after 2 s if the Rust engine disconnects
-          setTimeout(() => {
-            if (ws.readyState === ws.OPEN) startStream(ids);
-          }, 2_000);
-        }
-      },
-    );
+    try {
+      cancelGrpc = grpcBot.streamOrders(
+        ids,
+        (update) => {
+          if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify(update));
+          }
+        },
+        (err) => {
+          if (err) {
+            logger.warn({ err }, "gRPC stream ended with error, retrying in 5s");
+            setTimeout(() => {
+              if (ws.readyState === ws.OPEN) startStream(ids);
+            }, 5_000);
+          }
+        },
+      );
+    } catch (err) {
+      logger.warn({ err }, "gRPC streamOrders unavailable — Rust engine not running");
+      // Retry after 10s — don't crash the server
+      setTimeout(() => {
+        if (ws.readyState === ws.OPEN) startStream(ids);
+      }, 10_000);
+    }
   }
 
   startStream(orderIds);
 
   ws.on("message", (data) => {
-    // Client can re-subscribe to a new set of order IDs at any time
     try {
       const msg = JSON.parse(data.toString()) as { order_ids?: string[] };
       if (Array.isArray(msg.order_ids)) {

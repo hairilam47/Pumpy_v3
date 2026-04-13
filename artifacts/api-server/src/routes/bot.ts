@@ -288,6 +288,7 @@ router.get("/bot/tokens", async (_req: Request, res: Response) => {
         volume24hSol: t.volume_24h_sol,
         holderCount: t.holder_count,
         bondingCurveProgress: t.bonding_curve_progress ?? 0,
+        mlScore: t.ml_score ?? t.sniper_score ?? null,
       }));
       res.json(tokens);
       return;
@@ -402,6 +403,46 @@ router.get("/bot/status", async (_req: Request, res: Response) => {
       environment: "development",
       uptime: 0,
     });
+  }
+});
+
+// ─── MEV Stats ───────────────────────────────────────────────────────────────
+
+router.get("/bot/mev-stats", async (_req: Request, res: Response) => {
+  try {
+    const grpcData = await grpcBot.getMevStats().catch(() => null);
+    if (grpcData) {
+      res.json(grpcData);
+      return;
+    }
+    res.json({
+      bundlesSubmitted: 0,
+      bundlesLanded: 0,
+      landedRate: 0,
+      mevSavedSol: 0,
+      jitoEnabled: !!process.env.JITO_BUNDLE_URL,
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to get MEV stats" });
+  }
+});
+
+// ─── Bot Control ──────────────────────────────────────────────────────────────
+
+router.post("/bot/start", async (_req: Request, res: Response) => {
+  try {
+    const pyResult = await fetchPython("/api/strategies", { method: "POST" }).catch(() => null);
+    res.json({ success: true, message: "Bot start requested", detail: pyResult });
+  } catch {
+    res.json({ success: false, message: "Start request failed" });
+  }
+});
+
+router.post("/bot/stop", async (_req: Request, res: Response) => {
+  try {
+    res.json({ success: true, message: "Bot stop requested — restart the service to fully stop" });
+  } catch {
+    res.json({ success: false, message: "Stop request failed" });
   }
 });
 

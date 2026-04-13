@@ -49,15 +49,31 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 - `strategies/momentum.py` — MomentumTrader: volume/price momentum strategy
 - `api/routes.py` — FastAPI routes: /health, /metrics, /strategies, /portfolio, /orders, /tokens, /strategy/activate, /strategy/config
 
+## Dashboard Pages
+
+1. **Dashboard** (`/`) — portfolio cards, 24h PnL chart, engine metrics, MEV panel, live WebSocket trade feed, start/stop controls
+2. **Strategies** (`/strategies`) — enable/disable sniper & momentum strategies, edit buy amount per strategy
+3. **Tokens** (`/tokens`) — tracked token table with price, market cap, liquidity, holder count, ML score, bonding curve progress
+4. **Trades** (`/trades`) — full trade history table, manual order form
+
+## Dashboard Components
+
+- `artifacts/dashboard/src/hooks/use-live-trades.ts` — WebSocket hook connecting to `/api/bot/stream`
+- `artifacts/dashboard/src/components/LiveTradesFeed.tsx` — real-time trade table with status badges
+- `artifacts/dashboard/src/components/MevStatsPanel.tsx` — Jito bundle stats panel
+
 ## Key Files
 
 - `rust-engine/src/main.rs` — Rust engine entry point
 - `rust-engine/src/grpc_server.rs` — gRPC server
+- `rust-engine/proto/bot.proto` — gRPC proto definition (used by API server and Python stubs)
 - `python-strategy/main.py` — Python FastAPI entry point
 - `python-strategy/strategy_engine.py` — strategy orchestrator
-- `artifacts/api-server/src/routes/bot.ts` — Express API bridge routes
+- `artifacts/api-server/src/routes/bot.ts` — Express API bridge routes (includes /bot/mev-stats, /bot/start, /bot/stop)
+- `artifacts/api-server/src/index.ts` — WebSocket server bridging gRPC to browser
+- `artifacts/api-server/src/lib/grpc-client.ts` — gRPC client (proto path: process.cwd()/../../../rust-engine/proto/bot.proto)
 - `artifacts/dashboard/src/App.tsx` — Dashboard app with routing
-- `artifacts/dashboard/vite.config.ts` — Vite config (proxies /api to port 8080)
+- `artifacts/dashboard/vite.config.ts` — Vite config (proxies /api to port 8080, ws: true)
 - `lib/api-spec/openapi.yaml` — OpenAPI spec (10 bot endpoints)
 - `lib/db/src/schema/trades.ts` — trades table
 - `lib/db/src/schema/strategies.ts` — strategies table
@@ -66,7 +82,9 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 
 - Pump.fun program ID: `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`
 - Rust OpenSSL: `.cargo/config.toml` sets OPENSSL_DIR to Nix store paths
-- Dashboard proxies `/api/*` to API server on port 8080 via Vite dev server proxy
+- Dashboard proxies `/api/*` to API server on port 8080 via Vite dev server proxy (with ws: true for WebSocket)
 - Python API URL: controlled by `PYTHON_API_URL` env var (default: `http://localhost:8001`)
+- Proto file path: resolved via `process.cwd()/../../../rust-engine/proto/bot.proto` from the api-server package dir
+- WebSocket: Dashboard connects to `wss://host/api/bot/stream` (routed by Replit proxy to port 8080)
 
 See the `pnpm-workspace` skill for workspace structure details.

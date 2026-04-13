@@ -55,6 +55,7 @@ export default function TokensPage() {
                 <th className="text-right py-3 px-4 font-medium">Liquidity</th>
                 <th className="text-right py-3 px-4 font-medium">24h Volume</th>
                 <th className="text-right py-3 px-4 font-medium">Holders</th>
+                <th className="text-right py-3 px-4 font-medium">ML Score</th>
                 <th className="py-3 px-4 font-medium">BC Progress</th>
               </tr>
             </thead>
@@ -78,6 +79,18 @@ export default function TokensPage() {
                   <td className="py-3 px-4 text-right tabular-nums">{formatSol(token.liquiditySol, 2)}</td>
                   <td className="py-3 px-4 text-right tabular-nums">{formatSol(token.volume24hSol ?? 0, 1)}</td>
                   <td className="py-3 px-4 text-right tabular-nums">{token.holderCount ?? "—"}</td>
+                  <td className="py-3 px-4 text-right tabular-nums">
+                    {token.mlScore != null ? (
+                      <span className={cn(
+                        "px-1.5 py-0.5 rounded text-xs font-medium tabular-nums",
+                        token.mlScore >= 0.7 ? "bg-green-400/10 text-green-400"
+                          : token.mlScore >= 0.4 ? "bg-amber-400/10 text-amber-400"
+                          : "bg-red-400/10 text-red-400"
+                      )}>
+                        {(token.mlScore * 100).toFixed(0)}%
+                      </span>
+                    ) : "—"}
+                  </td>
                   <td className="py-3 px-4 min-w-32">
                     <BondingCurveBar progress={token.bondingCurveProgress} />
                   </td>

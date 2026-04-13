@@ -1,8 +1,13 @@
-import { useGetPortfolio, useGetBotStatus, useGetMetrics, useListTrades } from "@workspace/api-client-react";
-import { useQuery } from "@tanstack/react-query";
+import { useGetPortfolio, useGetBotStatus, useGetMetrics } from "@workspace/api-client-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { Activity, TrendingUp, TrendingDown, Wallet, Shield, Zap, ArrowUpRight, ArrowDownRight } from "lucide-react";
-import { cn, formatSol, formatPnl, formatPercent, shortenAddress, formatAge } from "@/lib/utils";
+import {
+  Activity, TrendingUp, TrendingDown, Wallet, Shield,
+  Play, Square, Loader2,
+} from "lucide-react";
+import { cn, formatSol, formatPnl, formatPercent, shortenAddress } from "@/lib/utils";
+import LiveTradesFeed from "@/components/LiveTradesFeed";
+import MevStatsPanel from "@/components/MevStatsPanel";
 
 function MetricCard({ label, value, sub, icon: Icon, trend }: {
   label: string;
@@ -18,7 +23,8 @@ function MetricCard({ label, value, sub, icon: Icon, trend }: {
         {Icon && <Icon className="w-4 h-4 text-muted-foreground" />}
       </div>
       <div className="flex items-end gap-2">
-        <span className={cn("text-xl font-bold tabular-nums",
+        <span className={cn(
+          "text-xl font-bold tabular-nums",
           trend === "up" && "text-green-400",
           trend === "down" && "text-red-400",
         )}>{value}</span>
@@ -37,25 +43,43 @@ function StatusBadge({ connected, label }: { connected: boolean; label: string }
   );
 }
 
+async function botControl(action: "start" | "stop") {
+  const res = await fetch(`/api/bot/${action}`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to ${action} bot`);
+  return res.json();
+}
+
 const MOCK_PNL_DATA = Array.from({ length: 24 }, (_, i) => ({
   time: `${String(i).padStart(2, "0")}:00`,
   pnl: (Math.sin(i / 4) * 0.3 + Math.random() * 0.1 - 0.03) * (1 + i * 0.02),
 }));
 
 export default function DashboardPage() {
+  const qc = useQueryClient();
   const { data: portfolio } = useGetPortfolio();
   const { data: status } = useGetBotStatus();
   const { data: metrics } = useGetMetrics();
-  const { data: trades } = useListTrades({ limit: 10 });
 
   const pnl = portfolio?.dailyPnlSol ?? 0;
   const totalPnl = portfolio?.totalPnlSol ?? 0;
+  const isRunning = status?.running ?? false;
+
+  const startBot = useMutation({
+    mutationFn: () => botControl("start"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["getBotStatus"] }),
+  });
+  const stopBot = useMutation({
+    mutationFn: () => botControl("stop"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["getBotStatus"] }),
+  });
+
+  const ctrlPending = startBot.isPending || stopBot.isPending;
 
   return (
     <div className="space-y-6">
-      {/* Status bar */}
+      {/* Status bar with bot controls */}
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge connected={status?.running ?? false} label="Bot Running" />
+        <StatusBadge connected={isRunning} label="Bot Running" />
         <StatusBadge connected={status?.rustEngineConnected ?? false} label="Rust Engine" />
         <StatusBadge connected={status?.pythonEngineRunning ?? false} label="Python ML" />
         {status?.walletAddress && (
@@ -65,10 +89,32 @@ export default function DashboardPage() {
           </div>
         )}
         {status?.environment && (
-          <div className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400">
             <span className="uppercase tracking-wider">{status.environment}</span>
           </div>
         )}
+
+        {/* Start / Stop controls */}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => isRunning ? stopBot.mutate() : startBot.mutate()}
+            disabled={ctrlPending}
+            className={cn(
+              "flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-opacity",
+              isRunning
+                ? "bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20"
+                : "bg-green-500/10 text-green-400 border border-green-500/30 hover:bg-green-500/20",
+              ctrlPending && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {ctrlPending
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : isRunning
+                ? <Square className="w-3.5 h-3.5" />
+                : <Play className="w-3.5 h-3.5" />}
+            {isRunning ? "Stop Bot" : "Start Bot"}
+          </button>
+        </div>
       </div>
 
       {/* Portfolio metrics */}
@@ -101,9 +147,8 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* PnL chart + Metrics */}
+      {/* PnL chart + Engine metrics */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* PnL Chart */}
         <div className="lg:col-span-2 bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold">24h PnL</h2>
@@ -133,7 +178,6 @@ export default function DashboardPage() {
           </ResponsiveContainer>
         </div>
 
-        {/* Bot metrics */}
         <div className="bg-card border border-border rounded-lg p-4 space-y-3">
           <h2 className="text-sm font-semibold mb-2">Engine Metrics</h2>
           {[
@@ -154,83 +198,15 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Recent trades */}
-      <div className="bg-card border border-border rounded-lg p-4">
-        <div className="flex items-center gap-2 mb-4">
-          <h2 className="text-sm font-semibold">Recent Trades</h2>
-          <span className="w-2 h-2 rounded-full bg-green-400 live-pulse" />
-          <span className="text-xs text-muted-foreground">Live</span>
+      {/* MEV stats + Live trade feed */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-1">
+          <MevStatsPanel />
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-muted-foreground border-b border-border">
-                <th className="text-left py-2 pr-4 font-medium">Token</th>
-                <th className="text-left py-2 pr-4 font-medium">Side</th>
-                <th className="text-right py-2 pr-4 font-medium">Amount</th>
-                <th className="text-left py-2 pr-4 font-medium">Strategy</th>
-                <th className="text-left py-2 pr-4 font-medium">Status</th>
-                <th className="text-right py-2 font-medium">Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades && trades.length > 0 ? (
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                (trades as any[]).map((trade) => (
-                  <tr key={trade.id} className="border-b border-border/50 hover:bg-secondary/30 transition-colors">
-                    <td className="py-2 pr-4">
-                      <div className="flex flex-col">
-                        <span className="font-medium text-foreground">{trade.tokenSymbol || "—"}</span>
-                        <span className="text-muted-foreground font-mono">{shortenAddress(trade.mint)}</span>
-                      </div>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <span className={cn("px-2 py-0.5 rounded text-xs font-semibold",
-                        trade.side === "BUY" ? "bg-green-400/10 text-green-400" : "bg-red-400/10 text-red-400"
-                      )}>
-                        {trade.side === "BUY" ? <ArrowUpRight className="inline w-3 h-3 mr-0.5" /> : <ArrowDownRight className="inline w-3 h-3 mr-0.5" />}
-                        {trade.side}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 text-right tabular-nums">{formatSol(trade.amountSol)}</td>
-                    <td className="py-2 pr-4">
-                      <span className="px-2 py-0.5 rounded bg-secondary text-muted-foreground text-xs">
-                        {trade.strategy}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <StatusChip status={trade.status} />
-                    </td>
-                    <td className="py-2 text-right text-muted-foreground">{formatAge(trade.createdAt)}</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={6} className="py-8 text-center text-muted-foreground">
-                    No trades yet — bot will populate data as it runs
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="lg:col-span-2">
+          <LiveTradesFeed />
         </div>
       </div>
     </div>
-  );
-}
-
-function StatusChip({ status }: { status: string }) {
-  const cfg: Record<string, { bg: string; text: string }> = {
-    Executed: { bg: "bg-green-400/10", text: "text-green-400" },
-    Pending: { bg: "bg-amber-400/10", text: "text-amber-400" },
-    Executing: { bg: "bg-blue-400/10", text: "text-blue-400" },
-    Failed: { bg: "bg-red-400/10", text: "text-red-400" },
-    Cancelled: { bg: "bg-muted", text: "text-muted-foreground" },
-  };
-  const style = cfg[status] || { bg: "bg-muted", text: "text-muted-foreground" };
-  return (
-    <span className={cn("px-2 py-0.5 rounded text-xs font-medium", style.bg, style.text)}>
-      {status}
-    </span>
   );
 }
