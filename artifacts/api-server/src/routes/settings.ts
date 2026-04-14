@@ -114,6 +114,35 @@ function maskString(val: string | undefined): string {
   return val.slice(0, 4) + "****" + val.slice(-4);
 }
 
+/**
+ * Check that a URL is a safe external target before using it in a server-side fetch.
+ * Rejects private/loopback IP ranges to prevent SSRF.
+ */
+function isSafeRpcUrl(urlStr: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  const host = parsed.hostname.toLowerCase();
+  // Block loopback and link-local hostnames
+  if (host === "localhost" || host === "0.0.0.0" || host.endsWith(".local")) return false;
+  // Block private IPv4 ranges and loopback
+  const ipv4Parts = host.split(".").map(Number);
+  if (ipv4Parts.length === 4 && ipv4Parts.every((n) => !isNaN(n))) {
+    const [a, b] = ipv4Parts;
+    if (a === 127) return false;                      // 127.0.0.0/8 loopback
+    if (a === 10) return false;                       // 10.0.0.0/8 private
+    if (a === 172 && b! >= 16 && b! <= 31) return false; // 172.16.0.0/12 private
+    if (a === 192 && b === 168) return false;         // 192.168.0.0/16 private
+    if (a === 169 && b === 254) return false;         // 169.254.0.0/16 link-local
+    if (a === 0) return false;                        // 0.0.0.0/8 reserved
+  }
+  return true;
+}
+
 async function pingRpc(url: string): Promise<number | null> {
   try {
     const start = Date.now();
@@ -341,8 +370,15 @@ router.put("/settings/config", async (req, res) => {
 router.post("/settings/config/test-rpc", async (req, res) => {
   try {
     const { url } = req.body as { url?: string };
-    if (!url || typeof url !== "string" || !url.startsWith("http")) {
-      res.status(400).json({ ok: false, error: "A valid http(s) URL is required" });
+    if (!url || typeof url !== "string") {
+      res.status(400).json({ ok: false, error: "A URL string is required" });
+      return;
+    }
+    if (!isSafeRpcUrl(url)) {
+      res.status(400).json({
+        ok: false,
+        error: "URL must be an external https:// or http:// address. Private/local addresses are not allowed.",
+      });
       return;
     }
     const latencyMs = await pingRpc(url);

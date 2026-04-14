@@ -61,23 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Initialize multi-RPC manager
-    let rpc_manager = Arc::new(
-        RpcManager::new(config.rpc_endpoints.clone())
-            .await
-            .map_err(|e| format!("RPC manager error: {}", e))?,
-    );
-    let rpc_manager = Arc::new(rpc_manager.as_ref().clone().with_metrics(metrics.clone()));
-    rpc_manager.start_health_checks();
-    info!("RPC manager initialized with {} endpoints", config.rpc_endpoints.len());
-
-    // Initialize database (optional — bot can run without DB in minimal mode)
+    // Initialize database first so DB-backed config overrides are applied BEFORE
+    // RpcManager is constructed with the (potentially overridden) endpoint list.
     let db_pool = match DatabasePool::new(&config.database_url).await {
         Ok(pool) => {
             if let Err(e) = database::run_migrations(&pool).await {
                 error!("Migration warning: {}", e);
             }
-            // Load runtime overrides from bot_config table (best-effort, no crash)
+            // Load runtime overrides from bot_config (best-effort, no crash).
+            // MUST happen before RpcManager so DB SOLANA_RPC_URL/URLS take effect.
             let db_overrides = database::load_db_config(&pool.pool).await;
             if !db_overrides.is_empty() {
                 info!("Applying {} runtime override(s) from bot_config", db_overrides.len());
@@ -96,6 +88,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
         }
     };
+
+    // Initialize multi-RPC manager using the final resolved endpoint list
+    // (env vars + DB overrides already applied above).
+    let rpc_manager = Arc::new(
+        RpcManager::new(config.rpc_endpoints.clone())
+            .await
+            .map_err(|e| format!("RPC manager error: {}", e))?,
+    );
+    let rpc_manager = Arc::new(rpc_manager.as_ref().clone().with_metrics(metrics.clone()));
+    rpc_manager.start_health_checks();
+    info!("RPC manager initialized with {} endpoints", config.rpc_endpoints.len());
 
     // Initialize PumpFun client
     let pumpfun_client = Arc::new(
