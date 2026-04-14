@@ -88,8 +88,41 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
     .execute(&db.pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
     info!("Database migrations complete");
     Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+pub struct ConfigRow {
+    pub key: String,
+    pub value: String,
+}
+
+/// Load non-sensitive runtime config from the bot_config table.
+/// Returns an empty map on any error — callers must fall back to env vars.
+pub async fn load_db_config(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    match sqlx::query_as::<_, ConfigRow>("SELECT key, value FROM bot_config")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(|r| (r.key, r.value)).collect(),
+        Err(e) => {
+            tracing::warn!("Could not load bot_config from DB (using env vars only): {}", e);
+            std::collections::HashMap::new()
+        }
+    }
 }
 
 pub async fn cleanup_old_data(db: &DbPool) -> Result<(), sqlx::Error> {

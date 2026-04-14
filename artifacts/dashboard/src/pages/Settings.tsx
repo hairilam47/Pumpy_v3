@@ -1,7 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
-import { CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server, Settings2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server,
+  Settings2, AlertTriangle, Save, Loader2, FlaskConical,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
 
 interface EnvVar {
   key: string;
@@ -9,6 +17,7 @@ interface EnvVar {
   description: string;
   setIn: string;
   set: boolean;
+  source: "db" | "env" | null;
   masked: string;
 }
 
@@ -27,6 +36,8 @@ interface SettingsStatus {
   envVars: EnvVar[];
 }
 
+type ConfigMap = Record<string, string>;
+
 function useSettingsStatus() {
   return useQuery<SettingsStatus>({
     queryKey: ["settingsStatus"],
@@ -37,6 +48,17 @@ function useSettingsStatus() {
     },
     refetchInterval: 30_000,
     staleTime: 20_000,
+  });
+}
+
+function useSettingsConfig() {
+  return useQuery<ConfigMap>({
+    queryKey: ["settingsConfig"],
+    queryFn: async () => {
+      const res = await fetch("/api/settings/config");
+      if (!res.ok) throw new Error("Failed to fetch config");
+      return res.json() as Promise<ConfigMap>;
+    },
   });
 }
 
@@ -63,8 +85,391 @@ function LatencyBadge({ ms }: { ms: number | null }) {
   );
 }
 
+function RestartNotice() {
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 text-xs text-yellow-400">
+      <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+      <span>
+        Changes saved. <strong>Restart the trading engine</strong> for connection or risk settings to take effect.
+      </span>
+    </div>
+  );
+}
+
+// ── Connection Card ───────────────────────────────────────────────────────────
+
+function ConnectionCard({ config }: { config: ConfigMap }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [rpcUrl, setRpcUrl] = useState(config["SOLANA_RPC_URL"] ?? "");
+  const [rpcUrls, setRpcUrls] = useState(config["SOLANA_RPC_URLS"] ?? "");
+  const [jitoUrl, setJitoUrl] = useState(config["JITO_BUNDLE_URL"] ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; latencyMs: number | null } | null>(null);
+  const [showRestart, setShowRestart] = useState(false);
+
+  useEffect(() => {
+    setRpcUrl(config["SOLANA_RPC_URL"] ?? "");
+    setRpcUrls(config["SOLANA_RPC_URLS"] ?? "");
+    setJitoUrl(config["JITO_BUNDLE_URL"] ?? "");
+  }, [config]);
+
+  async function handleTestRpc() {
+    if (!rpcUrl.trim()) {
+      toast({ title: "Enter an RPC URL first", variant: "destructive" });
+      return;
+    }
+    setIsTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/settings/config/test-rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: rpcUrl.trim() }),
+      });
+      const data = (await res.json()) as { ok: boolean; latencyMs: number | null };
+      setTestResult(data);
+    } catch {
+      setTestResult({ ok: false, latencyMs: null });
+    } finally {
+      setIsTesting(false);
+    }
+  }
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      const res = await fetch("/api/settings/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          SOLANA_RPC_URL: rpcUrl.trim(),
+          SOLANA_RPC_URLS: rpcUrls.trim(),
+          JITO_BUNDLE_URL: jitoUrl.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast({ title: "Connection settings saved" });
+      setShowRestart(true);
+      void queryClient.invalidateQueries({ queryKey: ["settingsConfig"] });
+      void queryClient.invalidateQueries({ queryKey: ["settingsStatus"] });
+    } catch {
+      toast({ title: "Failed to save settings", variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Wifi className="w-4 h-4 text-primary" />
+          Connection
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {showRestart && <RestartNotice />}
+
+        <div className="space-y-1.5">
+          <Label htmlFor="rpc-url" className="text-xs">
+            Primary RPC URL
+            <span className="ml-1.5 text-muted-foreground font-normal">(SOLANA_RPC_URL)</span>
+          </Label>
+          <div className="flex gap-2">
+            <Input
+              id="rpc-url"
+              value={rpcUrl}
+              onChange={(e) => { setRpcUrl(e.target.value); setTestResult(null); }}
+              placeholder="https://your-rpc.helius.xyz/..."
+              className="font-mono text-xs flex-1"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleTestRpc}
+              disabled={isTesting || !rpcUrl.trim()}
+              className="shrink-0"
+            >
+              {isTesting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FlaskConical className="w-3.5 h-3.5" />
+              )}
+              <span className="ml-1.5">Test</span>
+            </Button>
+          </div>
+          {testResult && (
+            <div
+              className={`flex items-center gap-2 text-xs mt-1 ${
+                testResult.ok ? "text-green-400" : "text-destructive"
+              }`}
+            >
+              <StatusIcon ok={testResult.ok} />
+              {testResult.ok
+                ? `Connected — ${testResult.latencyMs}ms`
+                : "Connection failed — check the URL"}
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="rpc-urls" className="text-xs">
+            Failover RPC URLs
+            <span className="ml-1.5 text-muted-foreground font-normal">
+              (SOLANA_RPC_URLS — comma-separated, optional)
+            </span>
+          </Label>
+          <Input
+            id="rpc-urls"
+            value={rpcUrls}
+            onChange={(e) => setRpcUrls(e.target.value)}
+            placeholder="https://backup1.rpc.com,https://backup2.rpc.com"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="jito-url" className="text-xs">
+            Jito Bundle URL
+            <span className="ml-1.5 text-muted-foreground font-normal">
+              (JITO_BUNDLE_URL — optional, enables MEV protection)
+            </span>
+          </Label>
+          <Input
+            id="jito-url"
+            value={jitoUrl}
+            onChange={(e) => setJitoUrl(e.target.value)}
+            placeholder="https://mainnet.block-engine.jito.wtf/api/v1/bundles"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <Button onClick={handleSave} disabled={isSaving} size="sm">
+          {isSaving ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+          ) : (
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+          )}
+          Save connection settings
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Trading Parameters Card ───────────────────────────────────────────────────
+
+function TradingParametersCard({ config }: { config: ConfigMap }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [maxPos, setMaxPos] = useState(config["MAX_POSITION_SIZE_SOL"] ?? "");
+  const [stopLoss, setStopLoss] = useState(config["STOP_LOSS_PERCENT"] ?? "");
+  const [takeProfit, setTakeProfit] = useState(config["TAKE_PROFIT_PERCENT"] ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [showRestart, setShowRestart] = useState(false);
+
+  useEffect(() => {
+    setMaxPos(config["MAX_POSITION_SIZE_SOL"] ?? "");
+    setStopLoss(config["STOP_LOSS_PERCENT"] ?? "");
+    setTakeProfit(config["TAKE_PROFIT_PERCENT"] ?? "");
+  }, [config]);
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      const res = await fetch("/api/settings/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          MAX_POSITION_SIZE_SOL: maxPos.trim(),
+          STOP_LOSS_PERCENT: stopLoss.trim(),
+          TAKE_PROFIT_PERCENT: takeProfit.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast({ title: "Trading parameters saved" });
+      setShowRestart(true);
+      void queryClient.invalidateQueries({ queryKey: ["settingsConfig"] });
+    } catch {
+      toast({ title: "Failed to save parameters", variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Settings2 className="w-4 h-4 text-primary" />
+          Trading Parameters
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {showRestart && <RestartNotice />}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="max-pos" className="text-xs">
+              Max Position Size (SOL)
+            </Label>
+            <Input
+              id="max-pos"
+              type="number"
+              step="0.1"
+              min="0"
+              value={maxPos}
+              onChange={(e) => setMaxPos(e.target.value)}
+              placeholder="10"
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">Max SOL per trade</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="stop-loss" className="text-xs">
+              Stop-Loss (%)
+            </Label>
+            <Input
+              id="stop-loss"
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              value={stopLoss}
+              onChange={(e) => setStopLoss(e.target.value)}
+              placeholder="10"
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">Exit at −X%</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="take-profit" className="text-xs">
+              Take-Profit (%)
+            </Label>
+            <Input
+              id="take-profit"
+              type="number"
+              step="1"
+              min="0"
+              value={takeProfit}
+              onChange={(e) => setTakeProfit(e.target.value)}
+              placeholder="50"
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">Exit at +X%</p>
+          </div>
+        </div>
+
+        <Button onClick={handleSave} disabled={isSaving} size="sm">
+          {isSaving ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+          ) : (
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+          )}
+          Save parameters
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Service URLs Card ─────────────────────────────────────────────────────────
+
+function ServiceUrlsCard({ config }: { config: ConfigMap }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [grpcUrl, setGrpcUrl] = useState(config["RUST_GRPC_URL"] ?? "");
+  const [pythonUrl, setPythonUrl] = useState(config["PYTHON_STRATEGY_URL"] ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setGrpcUrl(config["RUST_GRPC_URL"] ?? "");
+    setPythonUrl(config["PYTHON_STRATEGY_URL"] ?? "");
+  }, [config]);
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      const res = await fetch("/api/settings/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          RUST_GRPC_URL: grpcUrl.trim(),
+          PYTHON_STRATEGY_URL: pythonUrl.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast({ title: "Service URLs saved" });
+      void queryClient.invalidateQueries({ queryKey: ["settingsConfig"] });
+    } catch {
+      toast({ title: "Failed to save service URLs", variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Server className="w-4 h-4 text-primary" />
+          Internal Service URLs
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="grpc-url" className="text-xs">
+            Rust gRPC Address
+            <span className="ml-1.5 text-muted-foreground font-normal">(RUST_GRPC_URL)</span>
+          </Label>
+          <Input
+            id="grpc-url"
+            value={grpcUrl}
+            onChange={(e) => setGrpcUrl(e.target.value)}
+            placeholder="localhost:50051"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="python-url" className="text-xs">
+            Python Strategy Engine URL
+            <span className="ml-1.5 text-muted-foreground font-normal">(PYTHON_STRATEGY_URL)</span>
+          </Label>
+          <Input
+            id="python-url"
+            value={pythonUrl}
+            onChange={(e) => setPythonUrl(e.target.value)}
+            placeholder="http://localhost:8001"
+            className="font-mono text-xs"
+          />
+        </div>
+
+        <Button onClick={handleSave} disabled={isSaving} size="sm">
+          {isSaving ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+          ) : (
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+          )}
+          Save service URLs
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
 export default function SettingsPage() {
-  const { data, isLoading, error, dataUpdatedAt } = useSettingsStatus();
+  const { data: status, isLoading, error, dataUpdatedAt } = useSettingsStatus();
+  const { data: config, isLoading: configLoading } = useSettingsConfig();
 
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null;
 
@@ -78,12 +483,12 @@ export default function SettingsPage() {
             Settings &amp; Configuration
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Read-only view of environment configuration — no secrets are ever exposed.
+            Configure the trading bot. Wallet keys must be set in Replit Secrets — all other settings are editable here.
           </p>
         </div>
         {lastUpdated && (
           <p className="text-xs text-muted-foreground">
-            Updated {lastUpdated} &middot; refreshes every 30s
+            Status refreshed {lastUpdated}
           </p>
         )}
       </div>
@@ -100,214 +505,107 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {data && (
+      {/* Wallet — read-only */}
+      {status && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Key className="w-4 h-4 text-primary" />
+              Wallet
+              <Badge variant="secondary" className="text-xs ml-auto font-normal">Read-only — set in Replit Secrets</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-3">
+              <StatusIcon ok={status.wallet.configured} />
+              <div className="flex-1">
+                <div className="text-sm font-medium text-foreground">
+                  {status.wallet.configured ? "Wallet configured" : "No wallet configured"}
+                </div>
+                {status.wallet.source && (
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    Source: <span className="font-mono">{status.wallet.source}</span>
+                  </div>
+                )}
+              </div>
+              {status.wallet.configured && (
+                <Badge variant="secondary" className="text-xs">
+                  {status.wallet.source === "WALLET_PRIVATE_KEY" ? "Env Secret" : "Key File"}
+                </Badge>
+              )}
+            </div>
+
+            {status.wallet.pubkey ? (
+              <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+                <div className="text-xs text-muted-foreground mb-1">Public Key</div>
+                <div className="font-mono text-sm text-foreground break-all">
+                  {status.wallet.pubkey}
+                </div>
+              </div>
+            ) : status.wallet.configured ? (
+              <div className="rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                Public key is available when the Rust engine starts, or when{" "}
+                <span className="font-mono">WALLET_PRIVATE_KEY</span> is set as a JSON byte array.
+              </div>
+            ) : (
+              <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON array)
+                in the <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
+                <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Editable sections — populated once config loads */}
+      {config && !configLoading && (
         <>
-          {/* Wallet */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Key className="w-4 h-4 text-primary" />
-                Wallet
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex items-center gap-3">
-                <StatusIcon ok={data.wallet.configured} />
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-foreground">
-                    {data.wallet.configured ? "Wallet configured" : "No wallet configured"}
-                  </div>
-                  {data.wallet.source && (
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      Source:{" "}
-                      <span className="font-mono">{data.wallet.source}</span>
-                    </div>
-                  )}
-                </div>
-                {data.wallet.configured && (
-                  <Badge variant="secondary" className="text-xs">
-                    {data.wallet.source === "WALLET_PRIVATE_KEY" ? "Env Secret" : "Key File"}
-                  </Badge>
-                )}
-              </div>
-
-              {data.wallet.pubkey ? (
-                <div className="rounded-lg bg-muted/50 px-3 py-2.5">
-                  <div className="text-xs text-muted-foreground mb-1">Public Key</div>
-                  <div className="font-mono text-sm text-foreground break-all">
-                    {data.wallet.pubkey}
-                  </div>
-                </div>
-              ) : data.wallet.configured ? (
-                <div className="rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  Public key is available when the Rust engine starts, or when{" "}
-                  <span className="font-mono">WALLET_PRIVATE_KEY</span> is set as a
-                  JSON byte array.
-                </div>
-              ) : (
-                <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON
-                  array) in the{" "}
-                  <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
-                  <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* RPC Connection */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                {data.rpc.online ? (
-                  <Wifi className="w-4 h-4 text-primary" />
-                ) : (
-                  <WifiOff className="w-4 h-4 text-muted-foreground" />
-                )}
-                RPC Connection
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex items-center gap-3">
-                <StatusIcon ok={data.rpc.configured} />
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-foreground">
-                    {data.rpc.configured
-                      ? "RPC endpoint configured"
-                      : "No RPC endpoint configured"}
-                  </div>
-                  {data.rpc.url && (
-                    <div className="text-xs text-muted-foreground font-mono mt-0.5 truncate max-w-xs">
-                      {data.rpc.url}
-                    </div>
-                  )}
-                </div>
-                <LatencyBadge ms={data.rpc.latencyMs} />
-              </div>
-
-              {!data.rpc.configured && (
-                <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Set <span className="font-mono">SOLANA_RPC_URL</span> in the{" "}
-                  <span className="font-semibold">Replit Secrets panel</span>.{" "}
-                  For multi-endpoint failover use{" "}
-                  <span className="font-mono">SOLANA_RPC_URLS</span> (comma-separated).
-                </div>
-              )}
-
-              {data.rpc.configured && (
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="rounded-lg bg-muted/40 px-3 py-2 text-center">
-                    <div className="text-xs text-muted-foreground">Status</div>
-                    <div
-                      className={`text-sm font-semibold mt-0.5 ${
-                        data.rpc.online ? "text-green-400" : "text-red-400"
-                      }`}
-                    >
-                      {data.rpc.online ? "Online" : "Offline"}
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-muted/40 px-3 py-2 text-center">
-                    <div className="text-xs text-muted-foreground">Latency</div>
-                    <div className="text-sm font-semibold mt-0.5 font-mono">
-                      {data.rpc.latencyMs !== null ? `${data.rpc.latencyMs}ms` : "—"}
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-muted/40 px-3 py-2 text-center">
-                    <div className="text-xs text-muted-foreground">Protocol</div>
-                    <div className="text-sm font-semibold mt-0.5">JSON-RPC</div>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Environment Variables Table */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Server className="w-4 h-4 text-primary" />
-                Environment Variables
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="rounded-lg border border-border overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-muted/50">
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide w-8" />
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                        Variable
-                      </th>
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden md:table-cell">
-                        Required
-                      </th>
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden lg:table-cell">
-                        Purpose
-                      </th>
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden lg:table-cell">
-                        Where to set
-                      </th>
-                      <th className="text-left px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                        Value
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.envVars.map((v, i) => (
-                      <tr
-                        key={v.key}
-                        className={`border-t border-border ${
-                          i % 2 === 0 ? "" : "bg-muted/20"
-                        }`}
-                      >
-                        <td className="px-3 py-2.5">
-                          <StatusIcon ok={v.set} />
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="font-mono text-xs text-foreground">
-                            {v.key}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 hidden md:table-cell">
-                          <Badge
-                            variant={v.required ? "default" : "secondary"}
-                            className="text-xs"
-                          >
-                            {v.required ? "Required" : "Optional"}
-                          </Badge>
-                        </td>
-                        <td className="px-3 py-2.5 hidden lg:table-cell max-w-xs">
-                          <span className="text-xs text-muted-foreground leading-tight">
-                            {v.description}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 hidden lg:table-cell">
-                          <span className="text-xs text-muted-foreground/70 italic">
-                            {v.setIn}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          {v.set ? (
-                            <span className="font-mono text-xs text-muted-foreground">
-                              {v.masked || "****"}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground/40 italic">
-                              not set
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                Private keys and connection strings are never exposed — only their presence is confirmed.
-              </p>
-            </CardContent>
-          </Card>
+          <ConnectionCard config={config} />
+          <TradingParametersCard config={config} />
+          <ServiceUrlsCard config={config} />
         </>
+      )}
+
+      {configLoading && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground animate-pulse">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Loading saved config…
+        </div>
+      )}
+
+      {/* DATABASE_URL — read-only status */}
+      {status && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Server className="w-4 h-4 text-primary" />
+              Infrastructure
+              <Badge variant="secondary" className="text-xs ml-auto font-normal">Read-only</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {status.envVars
+              .filter((v) => ["DATABASE_URL", "GRPC_PORT", "METRICS_PORT"].includes(v.key))
+              .map((v) => (
+                <div key={v.key} className="flex items-center gap-3 py-2 border-b border-border last:border-0">
+                  <StatusIcon ok={v.set} />
+                  <span className="font-mono text-xs text-foreground flex-1">{v.key}</span>
+                  <span className="text-xs text-muted-foreground truncate max-w-[160px]">
+                    {v.set ? v.masked || "****" : <span className="italic opacity-40">not set</span>}
+                  </span>
+                  {v.set && (
+                    <Badge variant="secondary" className="text-xs">
+                      {v.source === "db" ? "saved" : "env"}
+                    </Badge>
+                  )}
+                </div>
+              ))}
+            <p className="text-xs text-muted-foreground mt-3">
+              DATABASE_URL is auto-injected by the Replit database attachment. Private keys are never exposed here.
+            </p>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

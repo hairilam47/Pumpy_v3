@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting PumpFun Trading Engine v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration from environment
-    let config = Config::from_env().map_err(|e| format!("Config error: {}", e))?;
+    let mut config = Config::from_env().map_err(|e| format!("Config error: {}", e))?;
     info!("Environment: {}", config.environment);
     info!("gRPC port: {}", config.grpc_port);
     info!("Metrics port: {}", config.metrics_port);
@@ -76,6 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(pool) => {
             if let Err(e) = database::run_migrations(&pool).await {
                 error!("Migration warning: {}", e);
+            }
+            // Load runtime overrides from bot_config table (best-effort, no crash)
+            let db_overrides = database::load_db_config(&pool.pool).await;
+            if !db_overrides.is_empty() {
+                info!("Applying {} runtime override(s) from bot_config", db_overrides.len());
+                config.apply_db_overrides(&db_overrides);
             }
             info!("Database connected");
             pool

@@ -20,7 +20,7 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 - **Package manager**: pnpm
 - **TypeScript version**: 5.9
 - **API framework**: Express 5 (api-server)
-- **Database**: PostgreSQL + Drizzle ORM (trades, strategies tables)
+- **Database**: PostgreSQL + Drizzle ORM (trades, strategies, bot_config tables)
 - **Validation**: Zod, drizzle-zod
 - **API codegen**: Orval (from `lib/api-spec/openapi.yaml`)
 - **Build**: esbuild (CJS bundle for api-server), Vite (dashboard)
@@ -55,6 +55,7 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 2. **Strategies** (`/strategies`) — enable/disable sniper & momentum strategies, edit buy amount per strategy
 3. **Tokens** (`/tokens`) — tracked token table with price, market cap, liquidity, holder count, ML score, bonding curve progress
 4. **Trades** (`/trades`) — full trade history table, manual order form
+5. **Settings** (`/settings`) — two-tier config: read-only wallet section (Replit Secrets), editable connection/trading/service URL sections (saved to DB)
 
 ## Dashboard Components
 
@@ -77,6 +78,14 @@ Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastA
 - `lib/api-spec/openapi.yaml` — OpenAPI spec (10 bot endpoints)
 - `lib/db/src/schema/trades.ts` — trades table
 - `lib/db/src/schema/strategies.ts` — strategies table
+- `lib/db/src/schema/bot-config.ts` — bot_config key-value table for runtime config
+
+## Settings Architecture (Two-Tier Config)
+
+- **Tier 1 (Replit Secrets — read-only in UI)**: `WALLET_PRIVATE_KEY`, `KEYPAIR_PATH`, `DATABASE_URL`
+- **Tier 2 (DB-backed — editable in Settings page)**: `SOLANA_RPC_URL`, `SOLANA_RPC_URLS`, `JITO_BUNDLE_URL`, `MAX_POSITION_SIZE_SOL`, `STOP_LOSS_PERCENT`, `TAKE_PROFIT_PERCENT`, `RUST_GRPC_URL`, `PYTHON_STRATEGY_URL`
+- DB values take precedence over env vars. Rust engine reads DB config at startup (after `run_migrations`). A restart is required for Rust to pick up changes.
+- Endpoints: `GET /api/settings/config`, `PUT /api/settings/config`, `POST /api/settings/config/test-rpc`
 
 ## Important Config
 

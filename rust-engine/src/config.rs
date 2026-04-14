@@ -1,6 +1,13 @@
 use std::env;
 use serde_json;
 
+fn provider_name(url: &str) -> String {
+    if url.contains("helius") { "helius".to_string() }
+    else if url.contains("quicknode") { "quicknode".to_string() }
+    else if url.contains("alchemy") { "alchemy".to_string() }
+    else { "public".to_string() }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub environment: String,
@@ -54,6 +61,36 @@ pub struct MonitoringConfig {
 }
 
 impl Config {
+    /// Apply non-sensitive overrides loaded from the bot_config DB table.
+    /// DB values take precedence over env vars. Best-effort — unknown keys are ignored.
+    pub fn apply_db_overrides(&mut self, overrides: &std::collections::HashMap<String, String>) {
+        if let Some(url) = overrides.get("SOLANA_RPC_URL").filter(|v| !v.is_empty()) {
+            let extra: Vec<RpcEndpointConfig> = self.rpc_endpoints.iter().skip(1).cloned().collect();
+            let primary = RpcEndpointConfig {
+                url: url.clone(),
+                provider: provider_name(url),
+                priority: 1,
+                ws_url: None,
+            };
+            let mut endpoints = vec![primary];
+            endpoints.extend(extra);
+            self.rpc_endpoints = endpoints;
+            tracing::info!("bot_config: SOLANA_RPC_URL overridden from DB");
+        }
+
+        if let Some(url) = overrides.get("JITO_BUNDLE_URL").filter(|v| !v.is_empty()) {
+            self.jito_bundle_url = Some(url.clone());
+            tracing::info!("bot_config: JITO_BUNDLE_URL overridden from DB");
+        }
+
+        if let Some(v) = overrides.get("MAX_POSITION_SIZE_SOL") {
+            if let Ok(f) = v.parse::<f64>() {
+                self.risk_limits.max_position_size_sol = f;
+                tracing::info!("bot_config: MAX_POSITION_SIZE_SOL overridden from DB ({})", f);
+            }
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         // RPC endpoint resolution (priority order):
         //   1. SOLANA_RPC_URL  — canonical single endpoint (simple path, set this first)

@@ -1,7 +1,22 @@
 import { Router } from "express";
 import { readFileSync } from "fs";
+import { db, botConfigTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
 
 const router = Router();
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const ALLOWED_CONFIG_KEYS = new Set([
+  "SOLANA_RPC_URL",
+  "SOLANA_RPC_URLS",
+  "JITO_BUNDLE_URL",
+  "MAX_POSITION_SIZE_SOL",
+  "STOP_LOSS_PERCENT",
+  "TAKE_PROFIT_PERCENT",
+  "RUST_GRPC_URL",
+  "PYTHON_STRATEGY_URL",
+]);
 
 // ── Base58 helpers (no external deps) ────────────────────────────────────────
 
@@ -55,22 +70,11 @@ function base58Decode(str: string): Uint8Array {
 
 // ── Pubkey extraction ─────────────────────────────────────────────────────────
 
-/**
- * Extract the 32-byte public key from a 64-byte Solana keypair buffer
- * and return it as a base58 string. Returns null on any parse failure.
- */
 function pubkeyFromKeypairBytes(bytes: Uint8Array): string | null {
   if (bytes.length !== 64) return null;
   return base58Encode(bytes.slice(32, 64));
 }
 
-/**
- * Derive the wallet public key from whichever source is configured.
- *
- * Priority:
- *   1. WALLET_PRIVATE_KEY — JSON array or base58 string
- *   2. KEYPAIR_PATH       — JSON file on disk
- */
 function deriveWalletPubkey(): { pubkey: string | null; source: string | null } {
   const rawKey = process.env.WALLET_PRIVATE_KEY;
   if (rawKey) {
@@ -126,6 +130,15 @@ async function pingRpc(url: string): Promise<number | null> {
   }
 }
 
+async function loadDbConfig(): Promise<Record<string, string>> {
+  try {
+    const rows = await db.select().from(botConfigTable);
+    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  } catch {
+    return {};
+  }
+}
+
 // ── Env-var catalogue ─────────────────────────────────────────────────────────
 
 interface EnvVarDef {
@@ -140,24 +153,24 @@ const ENV_VAR_DEFS: EnvVarDef[] = [
     key: "SOLANA_RPC_URL",
     required: true,
     description: "Solana JSON-RPC endpoint (e.g. your Helius / QuickNode URL).",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "SOLANA_RPC_URLS",
     required: false,
-    description: "Comma-separated RPC endpoints for automatic failover. Used only when SOLANA_RPC_URL is not set.",
-    setIn: "Replit Secrets panel",
+    description: "Comma-separated RPC endpoints for automatic failover.",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "WALLET_PRIVATE_KEY",
     required: true,
-    description: "Wallet private key as a base58 string or JSON byte array (64 bytes). Preferred over KEYPAIR_PATH.",
+    description: "Wallet private key as a base58 string or JSON byte array (64 bytes).",
     setIn: "Replit Secrets panel",
   },
   {
     key: "KEYPAIR_PATH",
     required: false,
-    description: "Path to a Solana keypair JSON file on disk. Used only when WALLET_PRIVATE_KEY is not set.",
+    description: "Path to a Solana keypair JSON file on disk.",
     setIn: "Replit Files panel — upload the file, then set the path here",
   },
   {
@@ -169,20 +182,20 @@ const ENV_VAR_DEFS: EnvVarDef[] = [
   {
     key: "JITO_BUNDLE_URL",
     required: false,
-    description: "Jito MEV bundle submission endpoint. Enables front-running protection via Jito.",
-    setIn: "Replit Secrets panel",
+    description: "Jito MEV bundle submission endpoint. Enables front-running protection.",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "PYTHON_STRATEGY_URL",
     required: false,
     description: "URL of the Python strategy engine. Defaults to http://localhost:8001.",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "RUST_GRPC_URL",
     required: false,
     description: "gRPC address of the Rust trading engine. Defaults to localhost:50051.",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "GRPC_PORT",
@@ -200,50 +213,57 @@ const ENV_VAR_DEFS: EnvVarDef[] = [
     key: "MAX_POSITION_SIZE_SOL",
     required: false,
     description: "Maximum SOL amount allowed per individual trade position.",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "STOP_LOSS_PERCENT",
     required: false,
     description: "Stop-loss exit threshold as a percentage (e.g. 10 = exit at −10%).",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
   {
     key: "TAKE_PROFIT_PERCENT",
     required: false,
     description: "Take-profit exit threshold as a percentage (e.g. 50 = exit at +50%).",
-    setIn: "Replit Secrets panel",
+    setIn: "Settings page or Replit Secrets panel",
   },
 ];
 
-// ── Route ─────────────────────────────────────────────────────────────────────
+// ── Routes ─────────────────────────────────────────────────────────────────────
 
 router.get("/settings/status", async (_req, res) => {
-  const walletInfo = deriveWalletPubkey();
+  const [walletInfo, dbConfig] = await Promise.all([
+    Promise.resolve(deriveWalletPubkey()),
+    loadDbConfig(),
+  ]);
 
-  // SOLANA_RPC_URL is the canonical simple path; SOLANA_RPC_URLS is the advanced failover list.
   const rpcUrl =
+    dbConfig["SOLANA_RPC_URL"] ||
     process.env.SOLANA_RPC_URL ||
+    dbConfig["SOLANA_RPC_URLS"]?.split(",")[0]?.trim() ||
     process.env.SOLANA_RPC_URLS?.split(",")[0]?.trim() ||
     null;
 
   const rpcLatencyMs = rpcUrl ? await pingRpc(rpcUrl) : null;
 
+  const secretKeys = new Set(["WALLET_PRIVATE_KEY", "DATABASE_URL"]);
+
   const envVars = ENV_VAR_DEFS.map((def) => {
-    const rawVal = process.env[def.key];
-    const isSecret =
-      def.key === "WALLET_PRIVATE_KEY" ||
-      def.key === "DATABASE_URL";
+    const envVal = process.env[def.key];
+    const dbVal = ALLOWED_CONFIG_KEYS.has(def.key) ? dbConfig[def.key] : undefined;
+    const effectiveVal = dbVal || envVal;
+    const isSecret = secretKeys.has(def.key);
     return {
       key: def.key,
       required: def.required,
       description: def.description,
       setIn: def.setIn,
-      set: !!rawVal,
-      masked: rawVal
+      set: !!effectiveVal,
+      source: dbVal ? "db" : envVal ? "env" : null,
+      masked: effectiveVal
         ? isSecret
           ? "****"
-          : maskString(rawVal)
+          : maskString(effectiveVal)
         : "",
     };
   });
@@ -262,6 +282,75 @@ router.get("/settings/status", async (_req, res) => {
     },
     envVars,
   });
+});
+
+router.get("/settings/config", async (_req, res) => {
+  try {
+    const dbConfig = await loadDbConfig();
+    const merged: Record<string, string> = {};
+    for (const key of ALLOWED_CONFIG_KEYS) {
+      const dbVal = dbConfig[key];
+      const envVal = process.env[key];
+      if (dbVal !== undefined) {
+        merged[key] = dbVal;
+      } else if (envVal !== undefined) {
+        merged[key] = envVal;
+      }
+    }
+    res.json(merged);
+  } catch (err) {
+    console.error("GET /settings/config error:", err);
+    res.status(500).json({ error: "Failed to load config" });
+  }
+});
+
+router.put("/settings/config", async (req, res) => {
+  try {
+    const body = req.body as Record<string, string>;
+    if (!body || typeof body !== "object") {
+      res.status(400).json({ error: "Request body must be a JSON object" });
+      return;
+    }
+    const entries = Object.entries(body).filter(
+      ([k, v]) => ALLOWED_CONFIG_KEYS.has(k) && typeof v === "string"
+    );
+    if (entries.length === 0) {
+      res.status(400).json({ error: "No valid config keys provided" });
+      return;
+    }
+    for (const [key, value] of entries) {
+      if (value === "") {
+        await db.delete(botConfigTable).where(eq(botConfigTable.key, key));
+      } else {
+        await db
+          .insert(botConfigTable)
+          .values({ key, value, updatedAt: new Date() })
+          .onConflictDoUpdate({
+            target: botConfigTable.key,
+            set: { value, updatedAt: new Date() },
+          });
+      }
+    }
+    res.json({ ok: true, updated: entries.map(([k]) => k) });
+  } catch (err) {
+    console.error("PUT /settings/config error:", err);
+    res.status(500).json({ error: "Failed to save config" });
+  }
+});
+
+router.post("/settings/config/test-rpc", async (req, res) => {
+  try {
+    const { url } = req.body as { url?: string };
+    if (!url || typeof url !== "string" || !url.startsWith("http")) {
+      res.status(400).json({ ok: false, error: "A valid http(s) URL is required" });
+      return;
+    }
+    const latencyMs = await pingRpc(url);
+    res.json({ ok: latencyMs !== null, latencyMs });
+  } catch (err) {
+    console.error("POST /settings/config/test-rpc error:", err);
+    res.status(500).json({ ok: false, error: "Test failed" });
+  }
 });
 
 export default router;
