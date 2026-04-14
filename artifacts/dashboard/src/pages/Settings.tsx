@@ -366,6 +366,10 @@ function TradingParametersCard({ config }: { config: ConfigMap }) {
           </div>
         </div>
 
+        <p className="text-xs text-muted-foreground/70">
+          Note: Stop-Loss and Take-Profit are persisted and reserved for the Python strategy engine. Max Position Size is applied to the Rust execution engine on next restart.
+        </p>
+
         <Button onClick={handleSave} disabled={isSaving} size="sm">
           {isSaving ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
