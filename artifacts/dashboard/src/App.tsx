@@ -1,5 +1,5 @@
 import { Switch, Route, Router as WouterRouter, Link, useLocation } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
@@ -13,6 +13,7 @@ import {
   LayoutDashboard, Bot, Coins, History, Settings2,
   Activity, Github, ExternalLink
 } from "lucide-react";
+import { getGetBotStatusQueryOptions } from "@workspace/api-client-react";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -92,6 +93,12 @@ function Sidebar() {
 }
 
 function MobileHeader() {
+  const { data: status } = useQuery({
+    ...getGetBotStatusQueryOptions(),
+    refetchInterval: 5_000,
+  });
+  const isRunning = status?.running ?? false;
+
   return (
     <header className="md:hidden sticky top-0 z-40 flex items-center gap-2.5 px-4 h-12 bg-sidebar border-b border-sidebar-border flex-shrink-0">
       <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
@@ -100,6 +107,18 @@ function MobileHeader() {
       <div className="leading-none">
         <div className="text-sm font-bold text-sidebar-foreground leading-none">PumpyPumpy</div>
         <div className="text-[10px] text-muted-foreground mt-0.5">Trading Bot</div>
+      </div>
+      <div className="ml-auto flex items-center gap-1.5">
+        <span className={cn(
+          "w-2 h-2 rounded-full flex-shrink-0",
+          isRunning ? "bg-green-400 live-pulse" : "bg-red-400"
+        )} />
+        <span className={cn(
+          "text-[11px] font-medium",
+          isRunning ? "text-green-400" : "text-red-400"
+        )}>
+          {isRunning ? "Running" : "Stopped"}
+        </span>
       </div>
     </header>
   );
