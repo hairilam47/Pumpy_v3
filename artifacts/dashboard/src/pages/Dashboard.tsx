@@ -3,9 +3,10 @@ import { useListTrades, getGetPortfolioQueryOptions, getGetBotStatusQueryOptions
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, Wallet, Shield, Layers,
-  Play, Square, Loader2,
+  Play, Square, Loader2, AlertTriangle,
 } from "lucide-react";
 import { cn, formatSol, formatPnl, formatPercent, shortenAddress } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 import LiveTradesFeed from "@/components/LiveTradesFeed";
 import MevStatsPanel from "@/components/MevStatsPanel";
 
@@ -51,6 +52,7 @@ async function botControl(action: "start" | "stop") {
 
 export default function DashboardPage() {
   const qc = useQueryClient();
+  const { toast } = useToast();
 
   const { data: portfolio } = useQuery({
     ...getGetPortfolioQueryOptions(),
@@ -70,14 +72,35 @@ export default function DashboardPage() {
   const pnl = portfolio?.dailyPnlSol ?? 0;
   const totalPnl = portfolio?.totalPnlSol ?? 0;
   const isRunning = status?.running ?? false;
+  const engineOffline = !isRunning && !(status?.pythonEngineRunning ?? false);
 
   const startBot = useMutation({
     mutationFn: () => botControl("start"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/bot/status"] }),
+    onSuccess: (data: { success: boolean; message: string }) => {
+      if (data.success) {
+        toast({ title: "Bot started", description: data.message });
+        qc.invalidateQueries({ queryKey: ["/api/bot/status"] });
+      } else {
+        toast({ title: "Could not start bot", description: data.message, variant: "destructive" });
+      }
+    },
+    onError: (err: Error) => {
+      toast({ title: "Start failed", description: err.message, variant: "destructive" });
+    },
   });
   const stopBot = useMutation({
     mutationFn: () => botControl("stop"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/bot/status"] }),
+    onSuccess: (data: { success: boolean; message: string }) => {
+      if (data.success) {
+        toast({ title: "Bot stopped", description: data.message });
+        qc.invalidateQueries({ queryKey: ["/api/bot/status"] });
+      } else {
+        toast({ title: "Could not stop bot", description: data.message, variant: "destructive" });
+      }
+    },
+    onError: (err: Error) => {
+      toast({ title: "Stop failed", description: err.message, variant: "destructive" });
+    },
   });
 
   const ctrlPending = startBot.isPending || stopBot.isPending;
@@ -106,7 +129,14 @@ export default function DashboardPage() {
       <div className="space-y-2">
         {/* Status badges row */}
         <div className="flex flex-wrap items-center gap-2">
-          <StatusBadge connected={isRunning} label="Bot Running" />
+          {engineOffline ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/50 border border-border text-xs min-h-[32px]">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+              <span className="text-amber-400 whitespace-nowrap">Engine offline</span>
+            </div>
+          ) : (
+            <StatusBadge connected={isRunning} label="Bot Running" />
+          )}
           <StatusBadge connected={status?.rustEngineConnected ?? false} label="Rust Engine" />
           <StatusBadge connected={status?.pythonEngineRunning ?? false} label="Python ML" />
           {status?.walletAddress && (

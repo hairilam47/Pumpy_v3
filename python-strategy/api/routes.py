@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import structlog
@@ -9,9 +9,8 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # Reference to the strategy engine (injected via app state)
-def get_engine():
-    from main import app
-    return app.state.engine
+def get_engine(request: Request):
+    return request.app.state.engine
 
 
 class OrderRequest(BaseModel):
