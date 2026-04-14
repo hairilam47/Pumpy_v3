@@ -50,7 +50,7 @@ export default function TokensPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div className="flex items-center gap-3">
         <h1 className="text-lg font-bold">Token Monitor</h1>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -73,13 +73,13 @@ export default function TokensPage() {
                 <th className="text-left py-3 px-4 font-medium">Token</th>
                 <th className="text-right py-3 px-4 font-medium">Detected</th>
                 <th className="text-right py-3 px-4 font-medium">Price (SOL)</th>
-                <th className="text-right py-3 px-4 font-medium">Market Cap</th>
+                <th className="text-right py-3 px-4 font-medium">Mkt Cap</th>
                 <th className="text-right py-3 px-4 font-medium">Liquidity</th>
-                <th className="text-right py-3 px-4 font-medium">24h Volume</th>
+                <th className="text-right py-3 px-4 font-medium">24h Vol</th>
                 <th className="text-right py-3 px-4 font-medium">Holders</th>
-                <th className="text-right py-3 px-4 font-medium">ML Score</th>
-                <th className="text-center py-3 px-4 font-medium">Action Taken</th>
-                <th className="py-3 px-4 font-medium">BC Progress</th>
+                <th className="text-right py-3 px-4 font-medium">ML</th>
+                <th className="text-center py-3 px-4 font-medium">Action</th>
+                <th className="py-3 px-4 font-medium">BC%</th>
               </tr>
             </thead>
             <tbody>

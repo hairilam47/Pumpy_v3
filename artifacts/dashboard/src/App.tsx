@@ -34,7 +34,7 @@ const NAV_LINKS = [
 function Sidebar() {
   const [location] = useLocation();
   return (
-    <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-sidebar-border flex flex-col min-h-screen">
+    <aside className="hidden md:flex w-56 flex-shrink-0 bg-sidebar border-r border-sidebar-border flex-col min-h-screen">
       {/* Logo */}
       <div className="px-5 py-5 border-b border-sidebar-border">
         <div className="flex items-center gap-2.5">
@@ -91,15 +91,55 @@ function Sidebar() {
   );
 }
 
+function MobileHeader() {
+  return (
+    <header className="md:hidden sticky top-0 z-40 flex items-center gap-2.5 px-4 h-12 bg-sidebar border-b border-sidebar-border flex-shrink-0">
+      <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
+        <Activity className="w-4 h-4 text-primary-foreground" />
+      </div>
+      <div className="leading-none">
+        <div className="text-sm font-bold text-sidebar-foreground leading-none">PumpyPumpy</div>
+        <div className="text-[10px] text-muted-foreground mt-0.5">Trading Bot</div>
+      </div>
+    </header>
+  );
+}
+
+function BottomNav() {
+  const [location] = useLocation();
+  return (
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex items-stretch bg-sidebar border-t border-sidebar-border bottom-nav-safe">
+      {NAV_LINKS.map(({ href, label, icon: Icon }) => {
+        const isActive = href === "/" ? location === "/" : location.startsWith(href);
+        return (
+          <Link
+            key={href}
+            href={href}
+            className={cn(
+              "flex-1 flex flex-col items-center justify-center gap-1 py-2 min-h-[56px] transition-colors active:bg-sidebar-accent",
+              isActive ? "text-primary" : "text-muted-foreground"
+            )}
+          >
+            <Icon className={cn("w-5 h-5", isActive && "drop-shadow-[0_0_4px_rgba(34,197,94,0.5)]")} />
+            <span className="text-[10px] leading-none font-medium">{label}</span>
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen bg-background">
       <Sidebar />
-      <main className="flex-1 overflow-auto">
-        <div className="max-w-6xl mx-auto p-6">
+      <main className="flex-1 overflow-auto flex flex-col min-w-0">
+        <MobileHeader />
+        <div className="max-w-6xl mx-auto w-full p-3 sm:p-6 pb-24 md:pb-6">
           {children}
         </div>
       </main>
+      <BottomNav />
     </div>
   );
 }

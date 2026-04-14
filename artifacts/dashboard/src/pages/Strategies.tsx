@@ -45,18 +45,18 @@ interface ParamFieldProps {
 }
 function ParamField({ label, value, onChange, step = "1", min = "0", unit }: ParamFieldProps) {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1.5">
       <label className="text-xs text-muted-foreground">{label}</label>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1.5">
         <input
           type="number"
-          className="w-full bg-background border border-border rounded px-2 py-1 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary"
+          className="w-full bg-background border border-border rounded-lg px-3 py-2.5 sm:py-2 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px] sm:min-h-0"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           step={step}
           min={min}
         />
-        {unit && <span className="text-xs text-muted-foreground shrink-0">{unit}</span>}
+        {unit && <span className="text-xs text-muted-foreground shrink-0 w-8">{unit}</span>}
       </div>
     </div>
   );
@@ -125,7 +125,7 @@ export default function StrategiesPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div>
         <h1 className="text-lg font-bold">Strategy Configurator</h1>
         <p className="text-sm text-muted-foreground mt-1">Enable, disable, and configure trading strategies in real time.</p>
@@ -137,13 +137,13 @@ export default function StrategiesPage() {
           const isEditingThis = editing === s.name;
           return (
             <div key={s.name} className={cn(
-              "bg-card border rounded-xl p-5 transition-all",
+              "bg-card border rounded-xl p-4 sm:p-5 transition-all",
               s.enabled ? "border-primary/40" : "border-border opacity-80"
             )}>
               {/* Header */}
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
-                  <div className={cn("p-2 rounded-lg", s.enabled ? "bg-primary/10" : "bg-secondary")}>
+                  <div className={cn("p-2 rounded-lg flex-shrink-0", s.enabled ? "bg-primary/10" : "bg-secondary")}>
                     <Icon className={cn("w-5 h-5", s.enabled ? "text-primary" : "text-muted-foreground")} />
                   </div>
                   <div>
@@ -156,7 +156,7 @@ export default function StrategiesPage() {
                 <button
                   onClick={() => handleToggle(s.name, s.enabled)}
                   disabled={updateStrategy.isPending}
-                  className="transition-transform hover:scale-110"
+                  className="transition-transform hover:scale-110 active:scale-95 p-1 min-h-[44px] min-w-[44px] flex items-center justify-center"
                   title={s.enabled ? "Disable strategy" : "Enable strategy"}
                 >
                   {s.enabled ? (
@@ -258,14 +258,14 @@ export default function StrategiesPage() {
                       <button
                         onClick={() => handleSave(s.name)}
                         disabled={updateStrategy.isPending}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded text-xs font-medium hover:opacity-90 disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-4 py-2.5 sm:py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-semibold hover:opacity-90 disabled:opacity-50 min-h-[44px] sm:min-h-0"
                       >
                         <Save className="w-3.5 h-3.5" />
                         Save
                       </button>
                       <button
                         onClick={() => { setEditing(null); setSaveError(null); }}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary rounded text-xs text-muted-foreground hover:text-foreground"
+                        className="flex items-center gap-1.5 px-4 py-2.5 sm:py-1.5 bg-secondary rounded-lg text-xs text-muted-foreground hover:text-foreground min-h-[44px] sm:min-h-0"
                       >
                         <X className="w-3.5 h-3.5" />
                         Cancel
@@ -281,7 +281,7 @@ export default function StrategiesPage() {
                     </div>
                     <button
                       onClick={() => openEditor(s)}
-                      className="text-xs text-primary hover:underline"
+                      className="text-xs text-primary hover:underline py-2 px-1 min-h-[44px] flex items-center"
                     >
                       Configure
                     </button>

@@ -478,23 +478,23 @@ export default function SettingsPage() {
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-            <Settings2 className="w-6 h-6 text-primary" />
-            Settings &amp; Configuration
+      <div className="space-y-1">
+        <div className="flex items-start justify-between gap-2">
+          <h1 className="text-xl sm:text-2xl font-bold text-foreground flex items-center gap-2">
+            <Settings2 className="w-5 h-5 sm:w-6 sm:h-6 text-primary flex-shrink-0" />
+            Settings
           </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Configure the trading bot. Wallet keys must be set in Replit Secrets — all other settings are editable here.
-          </p>
+          {lastUpdated && (
+            <p className="text-xs text-muted-foreground whitespace-nowrap mt-1">
+              Updated {lastUpdated}
+            </p>
+          )}
         </div>
-        {lastUpdated && (
-          <p className="text-xs text-muted-foreground">
-            Status refreshed {lastUpdated}
-          </p>
-        )}
+        <p className="text-sm text-muted-foreground">
+          Wallet keys must be set in Replit Secrets. All other settings are editable here.
+        </p>
       </div>
 
       {isLoading && (
@@ -513,10 +513,10 @@ export default function SettingsPage() {
       {status && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Key className="w-4 h-4 text-primary" />
+            <CardTitle className="text-base flex flex-wrap items-center gap-2">
+              <Key className="w-4 h-4 text-primary flex-shrink-0" />
               Wallet
-              <Badge variant="secondary" className="text-xs ml-auto font-normal">Read-only — set in Replit Secrets</Badge>
+              <Badge variant="secondary" className="text-xs ml-auto font-normal">Read-only</Badge>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -592,10 +592,10 @@ export default function SettingsPage() {
             {status.envVars
               .filter((v) => ["DATABASE_URL", "GRPC_PORT", "METRICS_PORT"].includes(v.key))
               .map((v) => (
-                <div key={v.key} className="flex items-center gap-3 py-2 border-b border-border last:border-0">
+                <div key={v.key} className="flex items-center gap-2 py-2 border-b border-border last:border-0">
                   <StatusIcon ok={v.set} />
-                  <span className="font-mono text-xs text-foreground flex-1">{v.key}</span>
-                  <span className="text-xs text-muted-foreground truncate max-w-[160px]">
+                  <span className="font-mono text-xs text-foreground flex-1 min-w-0 truncate">{v.key}</span>
+                  <span className="text-xs text-muted-foreground truncate max-w-[100px] sm:max-w-[200px]">
                     {v.set ? v.masked || "****" : <span className="italic opacity-40">not set</span>}
                   </span>
                   {v.set && (

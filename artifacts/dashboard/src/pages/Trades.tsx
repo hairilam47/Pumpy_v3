@@ -68,15 +68,16 @@ export default function TradesPage() {
     : (trades ?? []);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 sm:space-y-6">
+      {/* Page header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-lg font-bold">Trade History</h1>
           <p className="text-sm text-muted-foreground mt-0.5">All orders executed by the bot.</p>
         </div>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+          className="flex items-center justify-center gap-2 px-4 py-3 sm:py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:opacity-90 transition-opacity min-h-[44px] w-full sm:w-auto"
         >
           <Send className="w-4 h-4" />
           Manual Order
@@ -85,24 +86,24 @@ export default function TradesPage() {
 
       {/* Manual order form */}
       {showForm && (
-        <form onSubmit={handleSubmit} className="bg-card border border-border rounded-xl p-5 space-y-4">
+        <form onSubmit={handleSubmit} className="bg-card border border-border rounded-xl p-4 sm:p-5 space-y-4">
           <h2 className="text-sm font-semibold">Submit Manual Order</h2>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-2">
-              <label className="text-xs text-muted-foreground block mb-1">Token Mint Address</label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="sm:col-span-2">
+              <label className="text-xs text-muted-foreground block mb-1.5">Token Mint Address</label>
               <input
                 type="text"
                 required
-                className="w-full bg-secondary border border-border rounded px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-3 sm:py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px]"
                 placeholder="e.g. 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
                 value={form.tokenMint}
                 onChange={(e) => setForm({ ...form, tokenMint: e.target.value })}
               />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">Side</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">Side</label>
               <select
-                className="w-full bg-secondary border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-3 sm:py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px]"
                 value={form.side}
                 onChange={(e) => setForm({ ...form, side: e.target.value })}
               >
@@ -111,22 +112,22 @@ export default function TradesPage() {
               </select>
             </div>
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">Amount (SOL)</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">Amount (SOL)</label>
               <input
                 type="number"
                 required
                 step="0.001"
                 min="0.001"
-                className="w-full bg-secondary border border-border rounded px-3 py-2 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-3 sm:py-2 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px]"
                 placeholder="0.05"
                 value={form.amountSol}
                 onChange={(e) => setForm({ ...form, amountSol: e.target.value })}
               />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">Order Type</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">Order Type</label>
               <select
-                className="w-full bg-secondary border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-3 sm:py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px]"
                 value={form.orderType}
                 onChange={(e) => setForm({ ...form, orderType: e.target.value })}
               >
@@ -135,27 +136,27 @@ export default function TradesPage() {
               </select>
             </div>
             <div>
-              <label className="text-xs text-muted-foreground block mb-1">Slippage (bps)</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">Slippage (bps)</label>
               <input
                 type="number"
                 min="1"
                 max="1000"
-                className="w-full bg-secondary border border-border rounded px-3 py-2 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-3 sm:py-2 text-sm tabular-nums focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px]"
                 value={form.slippageBps}
                 onChange={(e) => setForm({ ...form, slippageBps: parseInt(e.target.value) })}
               />
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             <button
               type="submit"
               disabled={submitOrder.isPending}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              className="flex items-center justify-center px-4 py-3 sm:py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50 min-h-[44px] w-full sm:w-auto"
             >
               {submitOrder.isPending ? "Submitting..." : "Submit Order"}
             </button>
             {formMsg && (
-              <span className={cn("text-xs", formMsg.startsWith("Error") ? "text-red-400" : "text-green-400")}>
+              <span className={cn("text-xs text-center sm:text-left", formMsg.startsWith("Error") ? "text-red-400" : "text-green-400")}>
                 {formMsg}
               </span>
             )}
@@ -166,7 +167,7 @@ export default function TradesPage() {
       {/* Filters */}
       <div className="flex items-center gap-3">
         <select
-          className="bg-secondary border border-border rounded px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+          className="bg-secondary border border-border rounded-lg px-3 py-2.5 sm:py-1.5 text-sm sm:text-xs focus:outline-none focus:ring-1 focus:ring-primary min-h-[44px] sm:min-h-0"
           value={strategy}
           onChange={(e) => setStrategy(e.target.value)}
         >
@@ -180,9 +181,9 @@ export default function TradesPage() {
         </span>
       </div>
 
-      {/* Trades table */}
-      <div className="bg-card border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-xs">
+      {/* Trades table — horizontally scrollable on mobile */}
+      <div className="bg-card border border-border rounded-lg overflow-hidden overflow-x-auto">
+        <table className="w-full text-xs min-w-[640px]">
           <thead>
             <tr className="text-muted-foreground border-b border-border bg-secondary/20">
               <th className="text-left py-3 px-4 font-medium">Token</th>

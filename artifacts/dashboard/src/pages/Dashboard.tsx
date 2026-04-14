@@ -17,28 +17,28 @@ function MetricCard({ label, value, sub, icon: Icon, trend }: {
   trend?: "up" | "down" | "neutral";
 }) {
   return (
-    <div className="bg-card border border-border rounded-lg p-4 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{label}</span>
-        {Icon && <Icon className="w-4 h-4 text-muted-foreground" />}
+    <div className="bg-card border border-border rounded-lg p-3 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-1">
+        <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider font-medium leading-tight">{label}</span>
+        {Icon && <Icon className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
       </div>
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-1.5">
         <span className={cn(
-          "text-xl font-bold tabular-nums",
+          "text-base sm:text-xl font-bold tabular-nums leading-none",
           trend === "up" && "text-green-400",
           trend === "down" && "text-red-400",
         )}>{value}</span>
       </div>
-      {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
+      {sub && <span className="text-[10px] sm:text-xs text-muted-foreground leading-tight">{sub}</span>}
     </div>
   );
 }
 
 function StatusBadge({ connected, label }: { connected: boolean; label: string }) {
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary/50 border border-border text-xs">
-      <span className={cn("w-2 h-2 rounded-full", connected ? "bg-green-400 live-pulse" : "bg-red-400")} />
-      <span className={cn(connected ? "text-green-400" : "text-red-400")}>{label}</span>
+    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/50 border border-border text-xs min-h-[32px]">
+      <span className={cn("w-2 h-2 rounded-full flex-shrink-0", connected ? "bg-green-400 live-pulse" : "bg-red-400")} />
+      <span className={cn("whitespace-nowrap", connected ? "text-green-400" : "text-red-400")}>{label}</span>
     </div>
   );
 }
@@ -82,7 +82,6 @@ export default function DashboardPage() {
 
   const ctrlPending = startBot.isPending || stopBot.isPending;
 
-  // Build real hourly PnL chart from trades data
   const pnlChartData = (() => {
     const hourMap: Record<string, number> = {};
     const trades = tradesData ?? [];
@@ -102,57 +101,58 @@ export default function DashboardPage() {
   const activeStrategies = status?.activeStrategies ?? [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       {/* Status bar with bot controls */}
-      <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge connected={isRunning} label="Bot Running" />
-        <StatusBadge connected={status?.rustEngineConnected ?? false} label="Rust Engine" />
-        <StatusBadge connected={status?.pythonEngineRunning ?? false} label="Python ML" />
-        {status?.walletAddress && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary/50 border border-border text-xs text-muted-foreground">
-            <Wallet className="w-3.5 h-3.5" />
-            <span className="font-mono">{shortenAddress(status.walletAddress)}</span>
-          </div>
-        )}
-        {status?.environment && (
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400">
-            <span className="uppercase tracking-wider">{status.environment}</span>
-          </div>
-        )}
-        {activeStrategies.length > 0 && (
-          <div className="flex items-center gap-1 text-xs">
-            <span className="text-muted-foreground">Active:</span>
-            {activeStrategies.map((s) => (
-              <span key={s} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary capitalize">{s}</span>
-            ))}
-          </div>
-        )}
-
-        {/* Start / Stop controls */}
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            onClick={() => isRunning ? stopBot.mutate() : startBot.mutate()}
-            disabled={ctrlPending}
-            className={cn(
-              "flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-opacity",
-              isRunning
-                ? "bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20"
-                : "bg-green-500/10 text-green-400 border border-green-500/30 hover:bg-green-500/20",
-              ctrlPending && "opacity-50 cursor-not-allowed"
-            )}
-          >
-            {ctrlPending
-              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              : isRunning
-                ? <Square className="w-3.5 h-3.5" />
-                : <Play className="w-3.5 h-3.5" />}
-            {isRunning ? "Stop Bot" : "Start Bot"}
-          </button>
+      <div className="space-y-2">
+        {/* Status badges row */}
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge connected={isRunning} label="Bot Running" />
+          <StatusBadge connected={status?.rustEngineConnected ?? false} label="Rust Engine" />
+          <StatusBadge connected={status?.pythonEngineRunning ?? false} label="Python ML" />
+          {status?.walletAddress && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/50 border border-border text-xs text-muted-foreground min-h-[32px]">
+              <Wallet className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="font-mono">{shortenAddress(status.walletAddress)}</span>
+            </div>
+          )}
+          {status?.environment && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 min-h-[32px]">
+              <span className="uppercase tracking-wider">{status.environment}</span>
+            </div>
+          )}
+          {activeStrategies.length > 0 && (
+            <div className="flex items-center gap-1 text-xs">
+              <span className="text-muted-foreground">Active:</span>
+              {activeStrategies.map((s) => (
+                <span key={s} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary capitalize">{s}</span>
+              ))}
+            </div>
+          )}
         </div>
+
+        {/* Start / Stop — full-width on mobile, auto on desktop */}
+        <button
+          onClick={() => isRunning ? stopBot.mutate() : startBot.mutate()}
+          disabled={ctrlPending}
+          className={cn(
+            "flex items-center justify-center gap-2 w-full sm:w-auto sm:px-5 px-4 py-3 sm:py-2 rounded-lg text-sm font-semibold transition-opacity min-h-[44px]",
+            isRunning
+              ? "bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20"
+              : "bg-green-500/10 text-green-400 border border-green-500/30 hover:bg-green-500/20",
+            ctrlPending && "opacity-50 cursor-not-allowed"
+          )}
+        >
+          {ctrlPending
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : isRunning
+              ? <Square className="w-4 h-4" />
+              : <Play className="w-4 h-4" />}
+          {isRunning ? "Stop Bot" : "Start Bot"}
+        </button>
       </div>
 
-      {/* Portfolio metrics — all 6 required fields */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      {/* Portfolio metrics */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
         <MetricCard
           label="Total Value"
           value={formatSol(portfolio?.totalValueSol ?? 0)}
@@ -166,7 +166,7 @@ export default function DashboardPage() {
           trend="neutral"
         />
         <MetricCard
-          label="Positions Value"
+          label="Positions"
           value={formatSol(portfolio?.positionsValueSol ?? 0)}
           icon={Activity}
           trend="neutral"
@@ -187,7 +187,7 @@ export default function DashboardPage() {
         <MetricCard
           label="Win Rate"
           value={formatPercent(portfolio?.winRate ?? 0)}
-          sub={`${portfolio?.openPositionsCount ?? 0} open positions`}
+          sub={`${portfolio?.openPositionsCount ?? 0} open`}
           icon={Shield}
           trend={(portfolio?.winRate ?? 0) > 50 ? "up" : "down"}
         />
@@ -212,8 +212,8 @@ export default function DashboardPage() {
                   <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <XAxis dataKey="time" tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => v.toFixed(2)} />
+              <XAxis dataKey="time" tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} tickFormatter={(v: number) => v.toFixed(2)} width={40} />
               <Tooltip
                 contentStyle={{ background: "hsl(222 47% 11%)", border: "1px solid hsl(217 33% 17%)", borderRadius: 6, fontSize: 11 }}
                 itemStyle={{ color: "#22c55e" }}
