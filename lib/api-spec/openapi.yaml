@@ -11,6 +11,8 @@ tags:
     description: Health operations
   - name: bot
     description: Trading bot operations
+  - name: settings
+    description: Configuration and environment status
 paths:
   /healthz:
     get:
@@ -217,6 +219,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BotStatus"
+
+  /settings/status:
+    get:
+      operationId: getSettingsStatus
+      tags: [settings]
+      summary: Get configuration and environment variable status
+      description: >
+        Returns a read-only view of the bot's environment configuration including
+        wallet source and derived public key, RPC endpoint latency, and the status
+        of every tracked environment variable. No secrets or private key material
+        are ever returned — only their presence and masked values.
+      responses:
+        "200":
+          description: Settings and environment status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsStatus"
 
 components:
   schemas:
@@ -464,3 +484,71 @@ components:
         uptime:
           type: integer
       required: [running, rustEngineConnected, pythonEngineRunning]
+
+    EnvVar:
+      type: object
+      properties:
+        key:
+          type: string
+        required:
+          type: boolean
+          description: Whether this variable must be set for the bot to run.
+        description:
+          type: string
+          description: Human-readable description of the variable's purpose.
+        setIn:
+          type: string
+          description: Where in Replit or the environment this variable should be configured.
+        set:
+          type: boolean
+          description: True if the variable is currently set in the environment.
+        masked:
+          type: string
+          description: Partially masked value (secrets show only ****).
+      required: [key, required, description, setIn, set, masked]
+
+    WalletStatus:
+      type: object
+      properties:
+        pubkey:
+          type: string
+          nullable: true
+          description: Derived Solana public key (base58), null if key cannot be parsed.
+        source:
+          type: string
+          nullable: true
+          description: Which env var provided the key — WALLET_PRIVATE_KEY or KEYPAIR_PATH.
+        configured:
+          type: boolean
+          description: True if at least one wallet env var is set.
+      required: [pubkey, source, configured]
+
+    RpcStatus:
+      type: object
+      properties:
+        url:
+          type: string
+          nullable: true
+          description: Partially masked active RPC URL, null if not configured.
+        configured:
+          type: boolean
+        latencyMs:
+          type: integer
+          nullable: true
+          description: Round-trip latency in milliseconds from a getHealth probe, null if offline.
+        online:
+          type: boolean
+      required: [url, configured, latencyMs, online]
+
+    SettingsStatus:
+      type: object
+      properties:
+        wallet:
+          $ref: "#/components/schemas/WalletStatus"
+        rpc:
+          $ref: "#/components/schemas/RpcStatus"
+        envVars:
+          type: array
+          items:
+            $ref: "#/components/schemas/EnvVar"
+      required: [wallet, rpc, envVars]

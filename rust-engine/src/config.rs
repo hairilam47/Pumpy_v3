@@ -55,19 +55,30 @@ pub struct MonitoringConfig {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        // Support multiple RPC endpoints via comma-separated env vars:
-        //   SOLANA_RPC_URLS=https://mainnet.helius-rpc.com/?api-key=X,https://solana-api.projectserum.com
-        //   SOLANA_WS_URLS=wss://mainnet.helius-rpc.com/?api-key=X,wss://...  (optional, one per RPC)
-        //   RPC_PRIORITIES=1,2  (optional, one per RPC; lower = higher priority)
-        // Falls back to single SOLANA_RPC_URL / SOLANA_WS_URL if not set.
+        // RPC endpoint resolution (priority order):
+        //   1. SOLANA_RPC_URL  — canonical single endpoint (simple path, set this first)
+        //   2. SOLANA_RPC_URLS — comma-separated failover list (used when SOLANA_RPC_URL absent)
+        //   When both are set, SOLANA_RPC_URL is the primary and SOLANA_RPC_URLS entries are
+        //   appended as additional failover candidates.
+        //   Optional companion vars: SOLANA_WS_URLS, RPC_PRIORITIES, RPC_PROVIDERS
         let rpc_endpoints = {
-            let urls: Vec<String> = env::var("SOLANA_RPC_URLS")
-                .ok()
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-                .unwrap_or_else(|| {
-                    vec![env::var("SOLANA_RPC_URL")
-                        .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())]
-                });
+            let urls: Vec<String> = {
+                let single = env::var("SOLANA_RPC_URL").ok();
+                let multi: Vec<String> = env::var("SOLANA_RPC_URLS")
+                    .ok()
+                    .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                    .unwrap_or_default();
+                match single {
+                    Some(url) => {
+                        // SOLANA_RPC_URL is canonical — always first; SOLANA_RPC_URLS are failover
+                        let mut list = vec![url.trim().to_string()];
+                        list.extend(multi);
+                        list
+                    }
+                    None if !multi.is_empty() => multi,
+                    _ => vec!["https://api.mainnet-beta.solana.com".to_string()],
+                }
+            };
 
             let ws_urls: Vec<Option<String>> = env::var("SOLANA_WS_URLS")
                 .ok()
