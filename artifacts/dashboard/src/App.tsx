@@ -98,6 +98,7 @@ function MobileHeader() {
     refetchInterval: 5_000,
   });
   const isRunning = status?.running ?? false;
+  const engineOffline = !isRunning && !(status?.pythonEngineRunning ?? false);
 
   return (
     <header className="md:hidden sticky top-0 z-40 flex items-center gap-2.5 px-4 h-12 bg-sidebar border-b border-sidebar-border flex-shrink-0">
@@ -117,7 +118,7 @@ function MobileHeader() {
           "text-[11px] font-medium",
           isRunning ? "text-green-400" : "text-red-400"
         )}>
-          {isRunning ? "Running" : "Stopped"}
+          {isRunning ? "Running" : engineOffline ? "Engine offline" : "Stopped"}
         </span>
       </div>
     </header>

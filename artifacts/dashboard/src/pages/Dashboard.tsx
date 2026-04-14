@@ -3,7 +3,7 @@ import { useListTrades, getGetPortfolioQueryOptions, getGetBotStatusQueryOptions
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, Wallet, Shield, Layers,
-  Play, Square, Loader2, AlertTriangle,
+  Play, Square, Loader2,
 } from "lucide-react";
 import { cn, formatSol, formatPnl, formatPercent, shortenAddress } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -131,8 +131,8 @@ export default function DashboardPage() {
         <div className="flex flex-wrap items-center gap-2">
           {engineOffline ? (
             <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/50 border border-border text-xs min-h-[32px]">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
-              <span className="text-amber-400 whitespace-nowrap">Engine offline</span>
+              <span className="w-2 h-2 rounded-full flex-shrink-0 bg-red-400" />
+              <span className="text-red-400 whitespace-nowrap">Engine offline</span>
             </div>
           ) : (
             <StatusBadge connected={isRunning} label="Bot Running" />
