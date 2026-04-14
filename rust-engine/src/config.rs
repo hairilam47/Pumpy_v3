@@ -63,26 +63,69 @@ pub struct MonitoringConfig {
 impl Config {
     /// Apply non-sensitive overrides loaded from the bot_config DB table.
     /// DB values take precedence over env vars. Best-effort — unknown keys are ignored.
+    ///
+    /// RPC precedence (same as from_env but sourced from DB):
+    ///   DB SOLANA_RPC_URL  → primary endpoint
+    ///   DB SOLANA_RPC_URLS → comma-separated failover list
+    ///   If only one is set, env-derived counterpart provides the missing half.
     pub fn apply_db_overrides(&mut self, overrides: &std::collections::HashMap<String, String>) {
-        if let Some(url) = overrides.get("SOLANA_RPC_URL").filter(|v| !v.is_empty()) {
-            let extra: Vec<RpcEndpointConfig> = self.rpc_endpoints.iter().skip(1).cloned().collect();
-            let primary = RpcEndpointConfig {
-                url: url.clone(),
-                provider: provider_name(url),
+        // ── RPC endpoints ─────────────────────────────────────────────────────
+        let db_primary = overrides.get("SOLANA_RPC_URL").filter(|v| !v.is_empty()).cloned();
+        let db_failover: Option<Vec<String>> = overrides
+            .get("SOLANA_RPC_URLS")
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+        if db_primary.is_some() || db_failover.is_some() {
+            // Primary: DB value, or fall back to the env-derived first endpoint
+            let env_primary = self
+                .rpc_endpoints
+                .first()
+                .map(|e| e.url.clone())
+                .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+            let primary_url = db_primary.unwrap_or(env_primary);
+
+            // Failover: DB list (minus duplicates of primary), or env-derived remainder
+            let failover_urls: Vec<String> = match db_failover {
+                Some(db_fo) => db_fo.into_iter().filter(|u| u != &primary_url).collect(),
+                None => self.rpc_endpoints.iter().skip(1).map(|e| e.url.clone()).collect(),
+            };
+
+            let mut endpoints = vec![RpcEndpointConfig {
+                url: primary_url.clone(),
+                provider: provider_name(&primary_url),
                 priority: 1,
                 ws_url: None,
-            };
-            let mut endpoints = vec![primary];
-            endpoints.extend(extra);
+            }];
+            for (i, url) in failover_urls.into_iter().enumerate() {
+                endpoints.push(RpcEndpointConfig {
+                    url: url.clone(),
+                    provider: provider_name(&url),
+                    priority: (i + 2) as u8,
+                    ws_url: None,
+                });
+            }
+            let total = endpoints.len();
             self.rpc_endpoints = endpoints;
-            tracing::info!("bot_config: SOLANA_RPC_URL overridden from DB");
+            tracing::info!(
+                "bot_config: RPC endpoints rebuilt from DB (primary={}, total={})",
+                primary_url,
+                total
+            );
         }
 
+        // ── Jito bundle URL ────────────────────────────────────────────────────
         if let Some(url) = overrides.get("JITO_BUNDLE_URL").filter(|v| !v.is_empty()) {
             self.jito_bundle_url = Some(url.clone());
             tracing::info!("bot_config: JITO_BUNDLE_URL overridden from DB");
         }
 
+        // ── Risk limits ────────────────────────────────────────────────────────
         if let Some(v) = overrides.get("MAX_POSITION_SIZE_SOL") {
             if let Ok(f) = v.parse::<f64>() {
                 self.risk_limits.max_position_size_sol = f;
