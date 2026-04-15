@@ -8,6 +8,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 mod config;
 mod constants;
 mod database;
+mod decision;
 mod grpc_server;
 mod mev;
 mod metrics;
@@ -19,6 +20,7 @@ mod websocket;
 
 use config::Config;
 use database::DatabasePool;
+use decision::DecisionEngine;
 use grpc_server::{BotService, bot_proto::bot_server::BotServer};
 use mev::MevProtector;
 use metrics::Metrics;
@@ -128,6 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     info!("MEV protector initialized (Jito: {})", mev_protector.has_jito());
 
+    // Initialize Decision Engine (the single trade-gating authority)
+    let decision_engine = Arc::new(DecisionEngine::new());
+    info!("Decision Engine initialized");
+
     // Initialize order manager
     let order_config = OrderManagerConfig {
         max_pending_orders: 100,
@@ -138,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_portfolio_exposure_sol: config.risk_limits.max_portfolio_exposure_sol,
         max_daily_loss_sol: config.risk_limits.max_daily_loss_sol,
         max_sandwich_risk_score: config.risk_limits.max_sandwich_risk_score,
+        max_slippage_bps: config.risk_limits.max_slippage_bps,
     };
 
     let order_manager = Arc::new(OrderManager::new(
@@ -148,6 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics.clone(),
         order_config,
         config.trading.mev_protection_enabled,
+        decision_engine,
+        config.demo_mode,
     ));
     info!("Order manager initialized");
 

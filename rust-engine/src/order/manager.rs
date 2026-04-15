@@ -9,6 +9,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
 use crate::database::DatabasePool;
+use crate::decision::{Decision, DecisionContext, DecisionEngine};
 use crate::metrics::Metrics;
 use crate::mev::{MevProtector, JitoClient};
 use crate::pumpfun::PumpFunClient;
@@ -25,6 +26,8 @@ pub struct OrderManagerConfig {
     pub max_portfolio_exposure_sol: f64,
     pub max_daily_loss_sol: f64,
     pub max_sandwich_risk_score: u32,
+    /// Maximum allowed slippage in basis points.
+    pub max_slippage_bps: u64,
 }
 
 impl Default for OrderManagerConfig {
@@ -38,6 +41,7 @@ impl Default for OrderManagerConfig {
             max_portfolio_exposure_sol: 100.0,
             max_daily_loss_sol: 5.0,
             max_sandwich_risk_score: 70,
+            max_slippage_bps: 1000,
         }
     }
 }
@@ -56,6 +60,10 @@ pub struct OrderManager {
     event_tx: broadcast::Sender<OrderEvent>,
     config: OrderManagerConfig,
     mev_enabled: bool,
+    /// The single Decision Engine — all order gating flows through here.
+    decision_engine: Arc<DecisionEngine>,
+    /// True when started without a real wallet (ephemeral keypair / demo mode).
+    demo_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +87,8 @@ impl OrderManager {
         metrics: Arc<Metrics>,
         config: OrderManagerConfig,
         mev_enabled: bool,
+        decision_engine: Arc<DecisionEngine>,
+        demo_mode: bool,
     ) -> Self {
         let (order_tx, order_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(1000);
@@ -97,6 +107,8 @@ impl OrderManager {
             event_tx,
             config,
             mev_enabled,
+            decision_engine,
+            demo_mode,
         }
     }
 
@@ -108,12 +120,32 @@ impl OrderManager {
         &self.db_pool
     }
 
-    /// Submit a new order for execution
+    /// Submit a new order for execution.
+    /// The Decision Engine is the first gate — no order enters the queue without an Allow.
     pub async fn submit_order(&self, mut order: Order) -> Result<String, OrderError> {
-        self.validate_order(&order)?;
-        self.risk_check(&order).await?;
-
+        // Assign a provisional ID so the DecisionEngine can log it.
         order.id = Uuid::new_v4().to_string();
+
+        let decision = self.decision_engine.evaluate(&DecisionContext {
+            wallet_id: "wallet_001",
+            order: &order,
+            demo_mode: self.demo_mode,
+            max_position_size_sol: self.config.max_position_size_sol,
+            max_portfolio_exposure_sol: self.config.max_portfolio_exposure_sol,
+            max_daily_loss_sol: self.config.max_daily_loss_sol,
+            max_slippage_bps: self.config.max_slippage_bps,
+            // Sandwich check runs at execution time; pass 0 here so only the
+            // basic/risk rules gate the order at submission time.
+            max_sandwich_risk_score: self.config.max_sandwich_risk_score,
+            sandwich_risk_score: 0,
+            config_version: "v1",
+        });
+
+        match decision {
+            Decision::Allow => {}
+            Decision::Reject { reason } => return Err(OrderError::ExecutionError(reason)),
+            Decision::Halt { reason } => return Err(OrderError::ExecutionError(reason)),
+        }
         order.status = OrderStatus::Pending;
         order.created_at = Utc::now();
         order.updated_at = Utc::now();
@@ -215,12 +247,28 @@ impl OrderManager {
         self.metrics.active_orders.inc();
         self.metrics.pending_orders.dec();
 
-        // MEV sandwich risk check
+        // MEV sandwich risk check via Decision Engine (execution-time gate)
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
-        if risk.score > self.config.max_sandwich_risk_score {
+        let exec_decision = self.decision_engine.evaluate(&DecisionContext {
+            wallet_id: "wallet_001",
+            order: &order,
+            demo_mode: self.demo_mode,
+            max_position_size_sol: self.config.max_position_size_sol,
+            max_portfolio_exposure_sol: self.config.max_portfolio_exposure_sol,
+            max_daily_loss_sol: self.config.max_daily_loss_sol,
+            max_slippage_bps: self.config.max_slippage_bps,
+            max_sandwich_risk_score: self.config.max_sandwich_risk_score,
+            sandwich_risk_score: risk.score,
+            config_version: "v1",
+        });
+        if !exec_decision.is_allow() {
             order.status = OrderStatus::Failed;
-            order.error = Some(format!("Sandwich risk too high: score={}", risk.score));
+            order.error = Some(format!(
+                "DecisionEngine {}: {}",
+                exec_decision.label(),
+                exec_decision.reason()
+            ));
             order.updated_at = Utc::now();
             self.finalize_order(order).await?;
             self.metrics.orders_rejected.inc();
@@ -404,24 +452,6 @@ impl OrderManager {
         let _ = self.event_tx.send(event);
     }
 
-    fn validate_order(&self, order: &Order) -> Result<(), OrderError> {
-        if order.amount == 0 {
-            return Err(OrderError::InvalidAmount);
-        }
-        if order.slippage_bps > 1000 {
-            return Err(OrderError::SlippageTooHigh);
-        }
-        Ok(())
-    }
-
-    async fn risk_check(&self, order: &Order) -> Result<(), OrderError> {
-        let trade_value_sol = order.amount as f64 / 1_000_000_000.0;
-        if trade_value_sol > self.config.max_position_size_sol {
-            return Err(OrderError::PositionSizeTooLarge);
-        }
-        Ok(())
-    }
-
     async fn store_order(&self, order: &Order) -> Result<(), OrderError> {
         sqlx::query(
             r#"
@@ -520,6 +550,8 @@ impl OrderManager {
             event_tx: self.event_tx.clone(),
             config: self.config.clone(),
             mev_enabled: self.mev_enabled,
+            decision_engine: self.decision_engine.clone(),
+            demo_mode: self.demo_mode,
         }
     }
 
@@ -603,6 +635,8 @@ struct OrderManagerMinimal {
     event_tx: broadcast::Sender<OrderEvent>,
     config: OrderManagerConfig,
     mev_enabled: bool,
+    decision_engine: Arc<DecisionEngine>,
+    demo_mode: bool,
 }
 
 impl OrderManagerMinimal {
@@ -619,9 +653,25 @@ impl OrderManagerMinimal {
 
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
-        if risk.score > self.config.max_sandwich_risk_score {
+        let exec_decision = self.decision_engine.evaluate(&DecisionContext {
+            wallet_id: "wallet_001",
+            order: &order,
+            demo_mode: self.demo_mode,
+            max_position_size_sol: self.config.max_position_size_sol,
+            max_portfolio_exposure_sol: self.config.max_portfolio_exposure_sol,
+            max_daily_loss_sol: self.config.max_daily_loss_sol,
+            max_slippage_bps: self.config.max_slippage_bps,
+            max_sandwich_risk_score: self.config.max_sandwich_risk_score,
+            sandwich_risk_score: risk.score,
+            config_version: "v1",
+        });
+        if !exec_decision.is_allow() {
             order.status = OrderStatus::Failed;
-            order.error = Some(format!("Sandwich risk too high: score={}", risk.score));
+            order.error = Some(format!(
+                "DecisionEngine {}: {}",
+                exec_decision.label(),
+                exec_decision.reason()
+            ));
             order.updated_at = Utc::now();
             self.finalize_order_minimal(order).await?;
             return Ok(());
