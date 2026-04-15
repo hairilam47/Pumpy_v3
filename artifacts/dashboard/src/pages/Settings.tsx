@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server,
   Settings2, AlertTriangle, Save, Loader2, FlaskConical, Shield,
-  Info,
+  Info, X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -310,42 +310,38 @@ function StrategyPresetCard() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { data: presetData } = useActivePreset();
-  const [saving, setSaving] = useState(false);
-  const [pending, setPending] = useState<PresetId | null>(null);
+  const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
+  const [adminKey, setAdminKey] = useState("");
 
   const activePreset = (presetData?.preset ?? "balanced") as PresetId;
 
   const savePreset = useMutation({
-    mutationFn: async (preset: PresetId) => {
-      setSaving(true);
+    mutationFn: async ({ preset, key }: { preset: PresetId; key: string }) => {
       const res = await fetch("/api/strategy/preset", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Key": key,
+        },
         body: JSON.stringify({ preset }),
       });
       if (!res.ok) {
-        const err = (await res.json()) as { detail?: string };
-        throw new Error(err.detail ?? "Failed to save preset");
+        const err = (await res.json()) as { error?: string; detail?: string };
+        throw new Error(err.error ?? err.detail ?? "Failed to save preset");
       }
       return res.json();
     },
-    onSuccess: (_data, preset) => {
+    onSuccess: (_data, { preset }) => {
       toast({ title: `Strategy preset set to ${preset}` });
       void qc.invalidateQueries({ queryKey: ["activePreset"] });
-      setPending(null);
+      setPendingPreset(null);
+      setAdminKey("");
     },
     onError: (err: Error) => {
       toast({ title: "Failed to save preset", description: err.message, variant: "destructive" });
-      setPending(null);
+      setAdminKey("");
     },
-    onSettled: () => setSaving(false),
   });
-
-  function handleSelect(preset: PresetId) {
-    if (preset === activePreset) return;
-    setPending(preset);
-    savePreset.mutate(preset);
-  }
 
   return (
     <Card>
@@ -364,23 +360,28 @@ function StrategyPresetCard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {PRESETS.map((p) => {
             const isActive = p.id === activePreset;
-            const isSavingThis = pending === p.id && saving;
+            const isPending = pendingPreset === p.id;
             return (
               <button
                 key={p.id}
-                onClick={() => handleSelect(p.id)}
-                disabled={saving}
+                onClick={() => {
+                  if (!isActive && !pendingPreset) setPendingPreset(p.id);
+                }}
+                disabled={savePreset.isPending || !!pendingPreset}
                 className={cn(
-                  "relative rounded-lg border-2 px-3 py-3 text-left transition-all hover:opacity-90 disabled:opacity-60",
-                  isActive ? p.activeColor : p.color
+                  "relative rounded-lg border-2 px-3 py-3 text-left transition-all",
+                  isActive ? p.activeColor : p.color,
+                  !pendingPreset && !isActive && "hover:opacity-90 cursor-pointer",
+                  isPending && "ring-2 ring-primary/60",
+                  !!pendingPreset && !isPending && !isActive && "opacity-50",
                 )}
               >
-                {isActive && (
+                {isActive && !isPending && (
                   <span className="absolute top-2 right-2">
                     <CheckCircle className="w-3.5 h-3.5" />
                   </span>
                 )}
-                {isSavingThis && (
+                {isPending && savePreset.isPending && (
                   <span className="absolute top-2 right-2">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   </span>
@@ -392,6 +393,48 @@ function StrategyPresetCard() {
             );
           })}
         </div>
+
+        {/* Admin key prompt — shown when a non-active preset is selected */}
+        {pendingPreset && (
+          <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Changing to{" "}
+              <span className="font-semibold text-foreground capitalize">{pendingPreset}</span>{" "}
+              preset requires admin authorization.
+            </p>
+            <div className="flex items-center gap-2">
+              <Key className="w-4 h-4 text-primary flex-shrink-0" />
+              <Input
+                type="password"
+                placeholder="Enter admin key…"
+                value={adminKey}
+                onChange={(e) => setAdminKey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && adminKey) savePreset.mutate({ preset: pendingPreset, key: adminKey });
+                  if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); }
+                }}
+                className="h-7 text-xs flex-1"
+                autoFocus
+              />
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => savePreset.mutate({ preset: pendingPreset, key: adminKey })}
+                disabled={!adminKey || savePreset.isPending}
+              >
+                {savePreset.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Apply"}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 w-7 p-0"
+                onClick={() => { setPendingPreset(null); setAdminKey(""); }}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-start gap-2 rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
