@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import time
 from typing import Dict, List, Optional
@@ -43,6 +44,46 @@ PRESET_PARAMS: Dict[str, Dict] = {
 }
 
 PRESET_REFRESH_CYCLES = 12
+
+
+def _compute_advanced_metrics(pnl_series: List[float]) -> Dict:
+    """
+    Compute Sharpe ratio, max drawdown, and volatility from a list of per-trade PnL values (in SOL).
+    Returns zeroed dict when insufficient data.
+    """
+    if not pnl_series or len(pnl_series) < 2:
+        return {
+            "sharpe_ratio": 0.0,
+            "max_drawdown_sol": 0.0,
+            "volatility_sol": 0.0,
+        }
+
+    n = len(pnl_series)
+    mean = sum(pnl_series) / n
+    variance = sum((x - mean) ** 2 for x in pnl_series) / (n - 1)
+    std = math.sqrt(variance) if variance > 0 else 1e-9
+
+    # Annualise assuming each trade ≈ 5 minutes (288 trades/day, 365 days)
+    annualization = math.sqrt(288 * 365)
+    sharpe = (mean / std) * annualization
+
+    # Max drawdown: peak-to-trough on cumulative PnL curve
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for p in pnl_series:
+        cumulative += p
+        if cumulative > peak:
+            peak = cumulative
+        dd = peak - cumulative
+        if dd > max_dd:
+            max_dd = dd
+
+    return {
+        "sharpe_ratio": round(sharpe, 4),
+        "max_drawdown_sol": round(max_dd, 6),
+        "volatility_sol": round(std, 6),
+    }
 
 
 def _start_prometheus():
@@ -284,6 +325,14 @@ class StrategyEngine:
         total_pnl = sum(s.total_pnl for s in self.strategies)
         win_rate = (total_wins / total_trades * 100.0) if total_trades > 0 else 0.0
 
+        # Collect per-trade PnL history from strategies (for advanced metrics)
+        pnl_series = []
+        for s in self.strategies:
+            if hasattr(s, "pnl_history") and s.pnl_history:
+                pnl_series.extend(s.pnl_history)
+
+        advanced = _compute_advanced_metrics(pnl_series)
+
         return {
             "total_trades": total_trades,
             "total_wins": total_wins,
@@ -296,7 +345,9 @@ class StrategyEngine:
             "strategies": self.get_strategy_stats(),
             "data_collector": self.data_collector.get_stats(),
             "grpc_connected": self.grpc_client.connected,
+            "circuit_breaker_state": self.grpc_client.circuit_state,
             "active_preset": self._active_preset,
+            **advanced,
         }
 
     def _seed_mock_tokens(self):

@@ -212,6 +212,18 @@ pub struct WalletRegistryFullRow {
 
 /// Load non-sensitive runtime config from the bot_config table.
 /// Returns an empty map on any error — callers must fall back to env vars.
+/// Read a single key from bot_config. Returns None if the key is missing or on DB error.
+pub async fn get_config_value(pool: &DbPool, key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM bot_config WHERE key = $1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 pub async fn load_db_config(pool: &DbPool) -> std::collections::HashMap<String, String> {
     match sqlx::query_as::<_, ConfigRow>("SELECT key, value FROM bot_config")
         .fetch_all(pool)

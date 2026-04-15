@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
+import { useAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
 
 interface WalletEntry {
@@ -85,7 +86,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
   const qc = useQueryClient();
   const { data: config } = useWalletConfig(wallet.walletId);
   const [showKeyPrompt, setShowKeyPrompt] = useState(false);
-  const [adminKey, setAdminKey] = useState("");
+  const [adminKey, setAdminKey] = useAdminKey();
 
   const resumeMutation = useMutation({
     mutationFn: async (key: string) => {

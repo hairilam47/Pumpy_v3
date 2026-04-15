@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
+import { useAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
 
 interface EnvVar {
@@ -311,7 +312,7 @@ function StrategyPresetCard() {
   const qc = useQueryClient();
   const { data: presetData } = useActivePreset();
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
-  const [adminKey, setAdminKey] = useState("");
+  const [adminKey, setAdminKey] = useAdminKey();
 
   const activePreset = (presetData?.preset ?? "balanced") as PresetId;
 

@@ -9,6 +9,7 @@ import TokensPage from "@/pages/Tokens";
 import TradesPage from "@/pages/Trades";
 import SettingsPage from "@/pages/Settings";
 import WalletsPage from "@/pages/Wallets";
+import OfflineBanner from "@/components/OfflineBanner";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, Bot, Coins, History, Settings2,
@@ -154,6 +155,7 @@ function BottomNav() {
 function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen bg-background">
+      <OfflineBanner />
       <Sidebar />
       <main className="flex-1 overflow-auto flex flex-col min-w-0">
         <MobileHeader />

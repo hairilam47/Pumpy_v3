@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
 use std::pin::Pin;
+use std::time::{Instant, Duration};
+use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 use crate::metrics::Metrics;
 use crate::order::{Order, OrderManager, OrderSide, OrderStatus, OrderType};
@@ -17,6 +20,22 @@ pub mod bot_proto {
 use bot_proto::bot_server::Bot;
 use bot_proto::*;
 
+// ── Idempotency cache (Task #26) ──────────────────────────────────────────────
+const IKEY_TTL_SECS: u64 = 300; // 5 minutes
+
+struct IdempotencyEntry {
+    order_id: String,
+    recorded_at: Instant,
+}
+
+type IdempotencyCache = Arc<RwLock<HashMap<String, IdempotencyEntry>>>;
+
+fn make_ikey_cache() -> IdempotencyCache {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct BotService {
     order_manager: Arc<OrderManager>,
@@ -25,6 +44,7 @@ pub struct BotService {
     /// When true the engine started without a real wallet (ephemeral keypair).
     /// All trade-execution RPCs are rejected in this mode.
     demo_mode: bool,
+    ikey_cache: IdempotencyCache,
 }
 
 impl BotService {
@@ -39,6 +59,7 @@ impl BotService {
             pumpfun_client,
             metrics,
             demo_mode,
+            ikey_cache: make_ikey_cache(),
         }
     }
 }
@@ -55,7 +76,44 @@ impl Bot for BotService {
             ));
         }
         let req = request.into_inner();
-        info!("SubmitOrder: {} {} {}", req.side, req.token_mint, req.amount);
+
+        // Distributed tracing (Task #31)
+        let trace_id = if req.trace_id.is_empty() { "no-trace".to_string() } else { req.trace_id.clone() };
+        let client_order_id = req.client_order_id.clone();
+        let ikey = req.idempotency_key.clone();
+
+        info!(
+            trace_id = %trace_id,
+            client_order_id = %client_order_id,
+            side = %req.side,
+            mint = %req.token_mint,
+            amount = req.amount,
+            "SubmitOrder received"
+        );
+
+        // Idempotency check (Task #26) — deduplicate within 5-minute TTL
+        if !ikey.is_empty() {
+            // Evict stale entries
+            {
+                let mut cache = self.ikey_cache.write().await;
+                cache.retain(|_, v| v.recorded_at.elapsed() < Duration::from_secs(IKEY_TTL_SECS));
+            }
+
+            let cache = self.ikey_cache.read().await;
+            if let Some(entry) = cache.get(&ikey) {
+                warn!(
+                    idempotency_key = %ikey,
+                    existing_order_id = %entry.order_id,
+                    trace_id = %trace_id,
+                    "Duplicate request detected — returning existing order_id"
+                );
+                return Ok(Response::new(SubmitOrderResponse {
+                    order_id: entry.order_id.clone(),
+                    success: true,
+                    message: "Duplicate: returning existing order".to_string(),
+                }));
+            }
+        }
 
         let order_type = OrderType::from_str(&req.order_type).map_err(|e| {
             Status::invalid_argument(format!("Invalid order type: {}", e))
@@ -89,13 +147,28 @@ impl Bot for BotService {
         };
 
         match self.order_manager.submit_order(order).await {
-            Ok(order_id) => Ok(Response::new(SubmitOrderResponse {
-                order_id,
-                success: true,
-                message: "Order submitted successfully".to_string(),
-            })),
+            Ok(order_id) => {
+                // Store idempotency entry
+                if !ikey.is_empty() {
+                    let mut cache = self.ikey_cache.write().await;
+                    cache.insert(ikey.clone(), IdempotencyEntry {
+                        order_id: order_id.clone(),
+                        recorded_at: Instant::now(),
+                    });
+                }
+                info!(
+                    trace_id = %trace_id,
+                    order_id = %order_id,
+                    "Order submitted successfully"
+                );
+                Ok(Response::new(SubmitOrderResponse {
+                    order_id,
+                    success: true,
+                    message: "Order submitted successfully".to_string(),
+                }))
+            }
             Err(e) => {
-                error!("Failed to submit order: {}", e);
+                error!(trace_id = %trace_id, error = %e, "Failed to submit order");
                 Ok(Response::new(SubmitOrderResponse {
                     order_id: String::new(),
                     success: false,

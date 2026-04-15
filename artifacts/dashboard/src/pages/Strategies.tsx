@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useAdminKey } from "@/hooks/use-admin-key";
 
 interface WalletEntry {
   walletId: string;
@@ -91,7 +92,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
   const qc = useQueryClient();
   const { data: config, isLoading } = useWalletConfig(wallet.walletId);
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
-  const [adminKey, setAdminKey] = useState("");
+  const [adminKey, setAdminKey] = useAdminKey();
 
   const activePreset = (config?.strategyPreset ?? "balanced") as PresetId;
 

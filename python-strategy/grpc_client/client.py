@@ -1,6 +1,8 @@
 import asyncio
 import grpc
 import structlog
+import time
+import uuid
 from typing import AsyncIterator, Optional, Dict
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -14,6 +16,61 @@ _FATAL_GRPC_CODES = frozenset({
     grpc.StatusCode.INTERNAL,
 })
 
+# Circuit-breaker thresholds
+_CB_FAILURE_THRESHOLD = 5
+_CB_RECOVERY_INTERVAL = 30.0
+
+
+class CircuitBreaker:
+    """
+    Simple three-state circuit breaker (CLOSED → OPEN → HALF_OPEN → CLOSED).
+    Thread-safe because the asyncio event loop is single-threaded.
+    """
+
+    def __init__(self, failure_threshold: int = _CB_FAILURE_THRESHOLD,
+                 recovery_interval: float = _CB_RECOVERY_INTERVAL):
+        self._failure_threshold = failure_threshold
+        self._recovery_interval = recovery_interval
+        self._failures = 0
+        self._state = "CLOSED"
+        self._opened_at: Optional[float] = None
+
+    @property
+    def is_open(self) -> bool:
+        if self._state == "OPEN":
+            if time.monotonic() - self._opened_at >= self._recovery_interval:
+                self._state = "HALF_OPEN"
+                logger.info("Circuit breaker entering HALF_OPEN, attempting recovery")
+                return False
+            return True
+        return False
+
+    def record_success(self):
+        if self._state in ("HALF_OPEN", "OPEN"):
+            logger.info("Circuit breaker CLOSED after recovery")
+        self._state = "CLOSED"
+        self._failures = 0
+
+    def record_failure(self):
+        self._failures += 1
+        if self._state == "HALF_OPEN":
+            self._state = "OPEN"
+            self._opened_at = time.monotonic()
+            logger.warning("Circuit breaker re-opened during half-open probe",
+                           failures=self._failures)
+        elif self._failures >= self._failure_threshold and self._state == "CLOSED":
+            self._state = "OPEN"
+            self._opened_at = time.monotonic()
+            logger.error(
+                "Circuit breaker OPEN — order submission suspended",
+                consecutive_failures=self._failures,
+                recovery_in_secs=self._recovery_interval,
+            )
+
+    @property
+    def state(self) -> str:
+        return self._state
+
 
 class BotGrpcClient:
     """gRPC client for communicating with the Rust trading engine."""
@@ -25,6 +82,8 @@ class BotGrpcClient:
         self._connected = False
         self._reconnect_task: Optional[asyncio.Task] = None
         self._stopped = False
+
+        self._circuit_breaker = CircuitBreaker()
 
         # Load proto stubs at import time (not during connect)
         try:
@@ -53,7 +112,6 @@ class BotGrpcClient:
         self.stub = self._bot_pb2_grpc.BotStub(self.channel)
         self.bot_pb2 = self._bot_pb2
 
-        # Non-blocking: try initial probe; start reconnect loop regardless
         await self._probe_connection(target)
         self._reconnect_task = asyncio.create_task(self._reconnect_loop(target))
 
@@ -85,11 +143,7 @@ class BotGrpcClient:
                 delay = 5.0
 
     def _on_rpc_error(self, exc: grpc.RpcError):
-        """
-        Called on any gRPC RpcError.  Marks the channel as disconnected when the
-        error code indicates the connection is broken, so the reconnect loop can
-        quickly re-probe rather than waiting for the next probe interval.
-        """
+        """Track disconnection and circuit breaker on fatal gRPC errors."""
         try:
             code = exc.code()
         except Exception:
@@ -97,10 +151,8 @@ class BotGrpcClient:
         if code in _FATAL_GRPC_CODES:
             if self._connected:
                 self._connected = False
-                logger.warning(
-                    "gRPC channel marked disconnected after fatal error",
-                    code=str(code),
-                )
+                logger.warning("gRPC channel marked disconnected after fatal error", code=str(code))
+            self._circuit_breaker.record_failure()
 
     async def disconnect(self):
         """Close the gRPC channel and stop the reconnect loop."""
@@ -120,6 +172,14 @@ class BotGrpcClient:
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def circuit_open(self) -> bool:
+        return self._circuit_breaker.is_open
+
+    @property
+    def circuit_state(self) -> str:
+        return self._circuit_breaker.state
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
     async def submit_order(
         self,
@@ -133,12 +193,27 @@ class BotGrpcClient:
         price: Optional[float] = None,
         max_sol_cost: Optional[int] = None,
         min_sol_output: Optional[int] = None,
+        client_order_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> Dict:
-        """Submit an order to the Rust engine."""
+        """Submit an order to the Rust engine. Generates client_order_id and trace_id if not provided."""
         if not self._connected:
             logger.warning("Not connected to Rust engine, order not submitted",
                            token_mint=token_mint, side=side)
             return {"success": False, "message": "Not connected to Rust engine", "order_id": ""}
+
+        if self._circuit_breaker.is_open:
+            logger.warning(
+                "Circuit breaker OPEN — order submission skipped",
+                token_mint=token_mint, strategy=strategy_name,
+                recovery_state=self._circuit_breaker.state,
+            )
+            return {"success": False, "message": "Circuit breaker open — engine temporarily unavailable", "order_id": ""}
+
+        # Generate IDs if not provided
+        coid = client_order_id or str(uuid.uuid4())
+        ikey = coid  # use client_order_id as idempotency key
+        tid = trace_id or str(uuid.uuid4())
 
         try:
             request = self.bot_pb2.SubmitOrderRequest(
@@ -152,16 +227,29 @@ class BotGrpcClient:
                 price=price,
                 max_sol_cost=max_sol_cost,
                 min_sol_output=min_sol_output,
+                client_order_id=coid,
+                idempotency_key=ikey,
+                trace_id=tid,
             )
             response = await self.stub.SubmitOrder(request, timeout=10.0)
+            self._circuit_breaker.record_success()
+            logger.info(
+                "Order submitted",
+                order_id=response.order_id,
+                client_order_id=coid,
+                trace_id=tid,
+                strategy=strategy_name,
+            )
             return {
                 "success": response.success,
                 "order_id": response.order_id,
                 "message": response.message,
+                "client_order_id": coid,
+                "trace_id": tid,
             }
         except grpc.RpcError as e:
             self._on_rpc_error(e)
-            logger.error("gRPC SubmitOrder error", error=str(e))
+            logger.error("gRPC SubmitOrder error", error=str(e), trace_id=tid)
             raise
 
     async def cancel_order(self, order_id: str) -> Dict:

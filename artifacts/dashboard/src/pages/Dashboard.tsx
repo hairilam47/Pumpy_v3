@@ -3,7 +3,7 @@ import { useListTrades, getGetPortfolioQueryOptions, getGetBotStatusQueryOptions
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import {
   Activity, TrendingUp, TrendingDown, Wallet, Shield, Layers,
-  Play, Square, Loader2,
+  Play, Square, Loader2, BarChart3,
 } from "lucide-react";
 import { cn, formatSol, formatPnl, formatPercent, shortenAddress } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -68,6 +68,17 @@ export default function DashboardPage() {
   });
 
   const { data: tradesData } = useListTrades({ limit: 200 });
+
+  // Advanced metrics from Python ML engine (Task #30)
+  const { data: pyMetrics } = useQuery<Record<string, unknown>>({
+    queryKey: ["/api/bot/metrics"],
+    queryFn: async () => {
+      const res = await fetch("/api/bot/metrics");
+      if (!res.ok) return {};
+      return res.json() as Promise<Record<string, unknown>>;
+    },
+    refetchInterval: 15_000,
+  });
 
   const pnl = portfolio?.dailyPnlSol ?? 0;
   const totalPnl = portfolio?.totalPnlSol ?? 0;
@@ -273,6 +284,59 @@ export default function DashboardPage() {
           ))}
         </div>
       </div>
+
+      {/* Advanced strategy metrics (Task #30) */}
+      {pyMetrics && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+          <div className="bg-card border border-border rounded-lg p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider font-medium">Sharpe Ratio</span>
+              <BarChart3 className="w-3.5 h-3.5 text-muted-foreground" />
+            </div>
+            <span className={cn(
+              "text-base sm:text-xl font-bold tabular-nums",
+              Number(pyMetrics.sharpe_ratio ?? 0) >= 1 ? "text-green-400" : "text-muted-foreground"
+            )}>
+              {Number(pyMetrics.sharpe_ratio ?? 0).toFixed(2)}
+            </span>
+            <div className="text-[10px] text-muted-foreground mt-0.5">annualised</div>
+          </div>
+          <div className="bg-card border border-border rounded-lg p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider font-medium">Max Drawdown</span>
+              <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+            </div>
+            <span className="text-base sm:text-xl font-bold tabular-nums text-red-400">
+              {Number(pyMetrics.max_drawdown_sol ?? 0).toFixed(4)} SOL
+            </span>
+            <div className="text-[10px] text-muted-foreground mt-0.5">peak-to-trough</div>
+          </div>
+          <div className="bg-card border border-border rounded-lg p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider font-medium">Volatility</span>
+              <Activity className="w-3.5 h-3.5 text-amber-400" />
+            </div>
+            <span className="text-base sm:text-xl font-bold tabular-nums text-amber-400">
+              {Number(pyMetrics.volatility_sol ?? 0).toFixed(4)} SOL
+            </span>
+            <div className="text-[10px] text-muted-foreground mt-0.5">per trade σ</div>
+          </div>
+          <div className="bg-card border border-border rounded-lg p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider font-medium">Circuit Breaker</span>
+              <Shield className="w-3.5 h-3.5 text-muted-foreground" />
+            </div>
+            <span className={cn(
+              "text-base sm:text-xl font-bold tabular-nums",
+              String(pyMetrics.circuit_breaker_state ?? "CLOSED") === "CLOSED" ? "text-green-400" :
+              String(pyMetrics.circuit_breaker_state ?? "CLOSED") === "HALF_OPEN" ? "text-amber-400" : "text-red-400"
+            )}>
+              {String(pyMetrics.circuit_breaker_state ?? "CLOSED")}
+            </span>
+            <div className="text-[10px] text-muted-foreground mt-0.5">order submission</div>
+          </div>
+        </div>
+      )}
 
       {/* MEV stats + Live trade feed */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

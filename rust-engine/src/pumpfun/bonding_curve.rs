@@ -84,4 +84,43 @@ impl BondingCurveParams {
     pub fn min_sol_output_with_slippage(&self, sol_amount: u64, slippage_bps: u64) -> u64 {
         sol_amount.saturating_sub(sol_amount * slippage_bps / 10_000)
     }
+
+    /// Compute price impact for a buy (SOL → tokens) based on pool depth.
+    /// Returns `(tokens_out, price_impact_bps, max_sol_cost)`.
+    /// `max_slippage_bps` is the configured ceiling; the actual buffer applied is
+    /// `clamp(price_impact_bps * 1.5, 50, max_slippage_bps)` so thin pools
+    /// automatically widen the tolerance while deep pools keep it tight.
+    pub fn compute_buy_params(&self, sol_amount: u64, max_slippage_bps: u64) -> (u64, u64, u64) {
+        let tokens_out = self.tokens_for_sol(sol_amount);
+
+        let price_impact_bps = if self.virtual_sol_reserves > 0 && sol_amount > 0 {
+            let impact = (sol_amount as u128 * 10_000)
+                / (self.virtual_sol_reserves as u128 + sol_amount as u128);
+            impact as u64
+        } else {
+            max_slippage_bps
+        };
+
+        let applied_bps = ((price_impact_bps * 3 / 2).max(50)).min(max_slippage_bps);
+        let max_sol_cost = sol_amount + sol_amount * applied_bps / 10_000;
+        (tokens_out, price_impact_bps, max_sol_cost)
+    }
+
+    /// Compute price impact for a sell (tokens → SOL) based on pool depth.
+    /// Returns `(sol_out, price_impact_bps, min_sol_output)`.
+    pub fn compute_sell_params(&self, token_amount: u64, max_slippage_bps: u64) -> (u64, u64, u64) {
+        let sol_out = self.sol_for_tokens(token_amount);
+
+        let price_impact_bps = if self.virtual_token_reserves > 0 && token_amount > 0 {
+            let impact = (token_amount as u128 * 10_000)
+                / (self.virtual_token_reserves as u128 + token_amount as u128);
+            impact as u64
+        } else {
+            max_slippage_bps
+        };
+
+        let applied_bps = ((price_impact_bps * 3 / 2).max(50)).min(max_slippage_bps);
+        let min_sol_output = sol_out.saturating_sub(sol_out * applied_bps / 10_000);
+        (sol_out, price_impact_bps, min_sol_output)
+    }
 }

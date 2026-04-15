@@ -141,10 +141,111 @@ async def get_tracked_tokens(engine=Depends(get_engine)):
 @router.get("/metrics")
 async def get_metrics(engine=Depends(get_engine)):
     """
-    Aggregate performance metrics: win rate, PnL, open positions, trade count.
+    Aggregate performance metrics including Sharpe ratio, max drawdown, and volatility.
     Consumed by the dashboard via the Express API server.
     """
     return engine.get_metrics()
+
+
+class BacktestRequest(BaseModel):
+    strategy_name: str
+    token_mints: Optional[List[str]] = None
+    days: int = 7
+    initial_sol: float = 10.0
+
+
+@router.post("/backtest")
+async def run_backtest(body: BacktestRequest, engine=Depends(get_engine)):
+    """
+    Run a simplified historical backtest simulation against tracked-token price histories.
+    Uses the same rule-based signal generator as live trading.
+    Returns: equity curve, total return, Sharpe ratio, max drawdown, win rate, trade count.
+    """
+    import math
+    import random
+
+    strategy = next((s for s in engine.strategies if s.name == body.strategy_name), None)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail=f"Strategy '{body.strategy_name}' not found")
+
+    target_mints = set(body.token_mints or list(engine.tracked_tokens.keys())[:5])
+    sol = body.initial_sol
+    equity_curve: List[float] = [sol]
+    pnl_series: List[float] = []
+    wins = 0
+    trades = 0
+
+    # Replay price histories
+    for mint, token in engine.tracked_tokens.items():
+        if mint not in target_mints:
+            continue
+        history = token.price_history
+        if len(history) < 4:
+            continue
+        # Slide a window of 20 prices through history
+        for i in range(20, len(history)):
+            window = history[max(0, i - 20):i]
+            if len(window) < 3:
+                continue
+            signal_obj = await strategy.analyze(token)
+            if signal_obj is None:
+                continue
+            if signal_obj.side == "BUY":
+                entry_price = history[i - 1]
+                if i < len(history):
+                    exit_price = history[i]
+                else:
+                    continue
+                if entry_price <= 0:
+                    continue
+                return_pct = (exit_price - entry_price) / entry_price
+                trade_sol = getattr(strategy, "buy_amount_sol", 0.1)
+                pnl = trade_sol * return_pct
+                sol += pnl
+                pnl_series.append(pnl)
+                trades += 1
+                if pnl > 0:
+                    wins += 1
+                equity_curve.append(round(sol, 6))
+
+    # Compute advanced metrics
+    win_rate = (wins / trades * 100.0) if trades > 0 else 0.0
+    total_return_pct = (sol - body.initial_sol) / body.initial_sol * 100.0
+
+    n = len(pnl_series)
+    sharpe = 0.0
+    max_dd = 0.0
+    volatility = 0.0
+    if n >= 2:
+        mean = sum(pnl_series) / n
+        variance = sum((x - mean) ** 2 for x in pnl_series) / (n - 1)
+        std = math.sqrt(variance) if variance > 0 else 1e-9
+        volatility = std
+        sharpe = (mean / std) * math.sqrt(288 * 365)
+        cum = 0.0
+        peak = 0.0
+        for p in pnl_series:
+            cum += p
+            if cum > peak:
+                peak = cum
+            dd = peak - cum
+            if dd > max_dd:
+                max_dd = dd
+
+    return {
+        "strategy": body.strategy_name,
+        "days": body.days,
+        "initial_sol": body.initial_sol,
+        "final_sol": round(sol, 6),
+        "total_return_pct": round(total_return_pct, 4),
+        "total_trades": trades,
+        "wins": wins,
+        "win_rate": round(win_rate, 2),
+        "sharpe_ratio": round(sharpe, 4),
+        "max_drawdown_sol": round(max_dd, 6),
+        "volatility_sol": round(volatility, 6),
+        "equity_curve": equity_curve[-200:],
+    }
 
 
 @router.post("/strategy/activate")

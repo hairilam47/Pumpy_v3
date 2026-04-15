@@ -24,6 +24,10 @@ message SubmitOrderRequest {
     uint64 slippage_bps = 8;
     string strategy_name = 9;
     map<string, string> metadata = 10;
+    // Idempotency + tracing (Tasks #26, #31)
+    string client_order_id = 11;
+    string idempotency_key = 12;
+    string trace_id = 13;
 }
 
 message SubmitOrderResponse {

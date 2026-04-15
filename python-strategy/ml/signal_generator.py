@@ -5,9 +5,17 @@ from typing import List, Optional, Tuple
 from enum import Enum
 import structlog
 import os
-import pickle
+import time
+import threading
 
 logger = structlog.get_logger(__name__)
+
+try:
+    import joblib
+    _JOBLIB_AVAILABLE = True
+except ImportError:
+    import pickle as joblib  # fallback
+    _JOBLIB_AVAILABLE = False
 
 
 class SignalDirection(str, Enum):
@@ -106,25 +114,34 @@ class FeatureExtractor:
 class MLSignalGenerator:
     """ML-based signal generator using scikit-learn Random Forest."""
 
-    def __init__(self, model_path: str = "models/signal_model.pkl"):
+    def __init__(self, model_path: str = "models/signal_model.joblib"):
         self.model_path = model_path
+        self._legacy_path = model_path.replace(".joblib", ".pkl")
         self.model = None
         self.feature_extractor = FeatureExtractor()
+        self._lock = threading.Lock()
+        self._last_saved: Optional[float] = None
         self._try_load_model()
 
     def _try_load_model(self):
-        """Try to load a pre-trained model, or use rule-based fallback."""
-        if os.path.exists(self.model_path):
+        """Try to load a pre-trained model (joblib first, pickle fallback), or use rule-based fallback."""
+        paths_to_try = [self.model_path, self._legacy_path]
+        for path in paths_to_try:
+            if not os.path.exists(path):
+                continue
             try:
-                with open(self.model_path, "rb") as f:
-                    self.model = pickle.load(f)
-                logger.info("ML model loaded", path=self.model_path)
+                if _JOBLIB_AVAILABLE and path.endswith(".joblib"):
+                    model = joblib.load(path)
+                else:
+                    import pickle
+                    with open(path, "rb") as f:
+                        model = pickle.load(f)
+                self.model = model
+                logger.info("ML model loaded", path=path, backend="joblib" if _JOBLIB_AVAILABLE else "pickle")
+                return
             except Exception as e:
-                logger.warning("Failed to load ML model, using rule-based signals", error=str(e))
-                self.model = None
-        else:
-            logger.info("No ML model found, using rule-based signals")
-            self.model = None
+                logger.warning("Failed to load ML model, trying next path", path=path, error=str(e))
+        logger.info("No ML model found, using rule-based signals")
 
     def generate_signal(
         self,
@@ -285,7 +302,7 @@ class MLSignalGenerator:
         )
 
     def train(self, X: np.ndarray, y: np.ndarray):
-        """Train the ML model on labeled data."""
+        """Train the ML model on labeled data and persist it using joblib."""
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.preprocessing import StandardScaler
         from sklearn.pipeline import Pipeline
@@ -301,8 +318,35 @@ class MLSignalGenerator:
             )),
         ])
         model.fit(X, y)
-        self.model = model
-        os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-        with open(self.model_path, "wb") as f:
-            pickle.dump(model, f)
-        logger.info("ML model trained and saved", path=self.model_path, samples=len(X))
+        with self._lock:
+            self.model = model
+            self._persist_model(model)
+
+    def _persist_model(self, model):
+        """Save model to disk using joblib (falls back to pickle)."""
+        os.makedirs(os.path.dirname(self.model_path) or ".", exist_ok=True)
+        try:
+            if _JOBLIB_AVAILABLE:
+                joblib.dump(model, self.model_path, compress=3)
+                logger.info("ML model saved (joblib)", path=self.model_path)
+            else:
+                import pickle
+                with open(self.model_path, "wb") as f:
+                    pickle.dump(model, f)
+                logger.info("ML model saved (pickle fallback)", path=self.model_path)
+            self._last_saved = time.monotonic()
+        except Exception as e:
+            logger.error("Failed to persist ML model", error=str(e))
+
+    def reload_if_stale(self, max_age_seconds: float = 3600.0):
+        """Reload the model from disk if it has been updated externally."""
+        if not os.path.exists(self.model_path):
+            return
+        try:
+            mtime = os.path.getmtime(self.model_path)
+            if self._last_saved is None or mtime > self._last_saved:
+                with self._lock:
+                    self._try_load_model()
+                    logger.info("ML model reloaded from disk", path=self.model_path)
+        except Exception as e:
+            logger.warning("Could not check model staleness", error=str(e))

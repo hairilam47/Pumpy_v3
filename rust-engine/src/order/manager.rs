@@ -398,11 +398,21 @@ impl OrderManager {
             }
             Err(e) => {
                 if order.retry_count < self.config.max_retries {
-                    warn!("Order {} failed, retrying ({}/{}): {}", order.id, order.retry_count + 1, self.config.max_retries, e);
                     order.retry_count += 1;
+                    // Exponential backoff: base_delay * 2^(attempt-1)
+                    let backoff = self.config.retry_delay
+                        * 2u32.pow(order.retry_count.saturating_sub(1));
+                    warn!(
+                        order_id = %order.id,
+                        attempt = order.retry_count,
+                        max_retries = self.config.max_retries,
+                        backoff_ms = backoff.as_millis(),
+                        error = %e,
+                        "Order failed, retrying with exponential backoff"
+                    );
                     order.status = OrderStatus::Pending;
                     order.updated_at = Utc::now();
-                    tokio::time::sleep(self.config.retry_delay).await;
+                    tokio::time::sleep(backoff).await;
                     let _ = self.order_tx.send(order.clone());
                     let mut active = self.active_orders.write().await;
                     active.remove(&order.id);
@@ -419,24 +429,92 @@ impl OrderManager {
         self.finalize_order(order).await
     }
 
+    /// Fetch bonding curve params and compute dynamic slippage bounds.
+    /// Falls back to static slippage calculation if the RPC fetch fails.
+    async fn compute_slippage_bounds(&self, mint: &Pubkey, order: &Order) -> (u64, u64) {
+        match self.pumpfun_client.get_bonding_curve_params(mint).await {
+            Ok(bc) => match order.side {
+                OrderSide::Buy => {
+                    let (_, impact_bps, dyn_max_cost) =
+                        bc.compute_buy_params(order.amount, self.config.max_slippage_bps);
+                    let max_cost = order.max_cost.unwrap_or(dyn_max_cost);
+                    info!(
+                        order_id = %order.id,
+                        price_impact_bps = impact_bps,
+                        max_sol_cost = max_cost,
+                        "dynamic buy slippage from bonding curve"
+                    );
+                    (max_cost, 0)
+                }
+                OrderSide::Sell => {
+                    let (_, impact_bps, dyn_min_output) =
+                        bc.compute_sell_params(order.amount, self.config.max_slippage_bps);
+                    let min_output = order.min_output.unwrap_or(dyn_min_output);
+                    info!(
+                        order_id = %order.id,
+                        price_impact_bps = impact_bps,
+                        min_sol_output = min_output,
+                        "dynamic sell slippage from bonding curve"
+                    );
+                    (0, min_output)
+                }
+            },
+            Err(e) => {
+                warn!(
+                    order_id = %order.id,
+                    error = %e,
+                    "bonding curve fetch failed; using static slippage"
+                );
+                let max_cost = order.max_cost.unwrap_or(
+                    order.amount + order.amount * order.slippage_bps / 10_000,
+                );
+                let min_output = order.min_output.unwrap_or(
+                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+                );
+                (max_cost, min_output)
+            }
+        }
+    }
+
     /// Execute a trade, preferring Jito bundle submission when MEV protection is enabled.
-    /// Falls back to standard RPC send if Jito is not configured or the bundle fails.
+    /// On Jito failure waits 2 seconds and retries the bundle once before falling back to
+    /// direct RPC. Slippage bounds are computed dynamically from the bonding curve.
     async fn execute_with_mev_protection(
         &self,
         mint: &Pubkey,
         order: &Order,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // If Jito is available and MEV protection is on, try bundle submission first
+        let (max_cost, min_output) = self.compute_slippage_bounds(mint, order).await;
+
         if self.mev_enabled {
             if let Some(jito) = &self.jito_client {
-                match self.execute_via_jito(mint, order, jito.clone()).await {
+                match self.execute_via_jito(mint, order, jito.clone(), max_cost, min_output).await {
                     Ok(sig) => {
                         self.metrics.jito_bundles_landed.inc();
-                        info!("Order {} executed via Jito bundle: {}", order.id, sig);
+                        info!(order_id = %order.id, sig = %sig, "executed via Jito bundle");
                         return Ok(sig);
                     }
                     Err(e) => {
-                        warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
+                        warn!(
+                            order_id = %order.id,
+                            error = %e,
+                            "Jito bundle failed; retrying once after 2s"
+                        );
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        match self.execute_via_jito(mint, order, jito.clone(), max_cost, min_output).await {
+                            Ok(sig) => {
+                                self.metrics.jito_bundles_landed.inc();
+                                info!(order_id = %order.id, sig = %sig, attempt = 2, "executed via Jito bundle (retry)");
+                                return Ok(sig);
+                            }
+                            Err(e2) => {
+                                warn!(
+                                    order_id = %order.id,
+                                    error = %e2,
+                                    "Jito retry also failed; falling back to RPC"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -445,53 +523,40 @@ impl OrderManager {
         // Direct RPC fallback
         match order.side {
             OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
                 self.pumpfun_client.buy_token(mint, order.amount, max_cost, order.slippage_bps).await
             }
             OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
-                );
                 self.pumpfun_client.sell_token(mint, order.amount, min_output, order.slippage_bps).await
             }
         }
     }
 
     /// Build and submit a Jito MEV bundle for the given order.
-    /// The bundle consists of:
-    ///   1. The trade transaction (buy or sell)
-    ///   2. A tip transaction to a Jito tip account
+    /// `max_cost` / `min_output` are pre-computed dynamic slippage bounds.
     async fn execute_via_jito(
         &self,
         mint: &Pubkey,
         order: &Order,
         jito: Arc<JitoClient>,
+        max_cost: u64,
+        min_output: u64,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Compute tip amount: 0.001 SOL default, proportional to trade size
+        // Fixed tip: 0.001 % of trade value, minimum 5 000 lamports
         let trade_sol = order.amount as f64 / 1_000_000_000.0;
-        let tip_lamports = (trade_sol * 0.001 * 1_000_000_000.0) as u64;
-        let tip_lamports = tip_lamports.max(5_000); // minimum 5000 lamports
+        let tip_lamports = ((trade_sol * 0.001 * 1_000_000_000.0) as u64).max(5_000);
 
-        // Build the trade transaction
         let (trade_tx, _blockhash) = match order.side {
             OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
                 self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
             }
             OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
-                );
                 self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
             }
         };
 
-        // Submit bundle: [trade_tx].  The tip is embedded as an instruction in the trade_tx
-        // via the JitoClient's tip instruction (added in the build step for simplicity).
-        // For a proper Jito bundle the tip is a separate tx; we submit both here.
         let bundle_id = jito.send_bundle(vec![trade_tx]).await?;
+        info!(order_id = %order.id, bundle_id = %bundle_id, tip_lamports, "Jito bundle submitted");
 
-        // Poll for bundle status (up to 5 seconds)
         for _ in 0..5 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             match jito.get_bundle_status(&bundle_id).await {
@@ -499,13 +564,12 @@ impl OrderManager {
                     return Ok(bundle_id);
                 }
                 Ok(status) if status == "failed" => {
-                    return Err(format!("Jito bundle {} failed", bundle_id).into());
+                    return Err(format!("Jito bundle {} failed (status={})", bundle_id, status).into());
                 }
                 _ => {}
             }
         }
 
-        // Return bundle_id as pseudo-signature if not yet confirmed
         Ok(bundle_id)
     }
 
