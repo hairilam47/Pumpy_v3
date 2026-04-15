@@ -17,6 +17,23 @@ use crate::mev::{MevProtector, JitoClient};
 use crate::pumpfun::PumpFunClient;
 use super::{Order, OrderError, OrderSide, OrderStatus, OrderType};
 
+/// Returns `true` when an execution error is worth retrying (transient / network errors).
+///
+/// Deterministic Solana failures (bad parameters, insufficient balance, duplicate
+/// transaction) fail fast without consuming the retry budget.  Transient errors
+/// (network timeouts, RPC pressure, blockhash expiry) are allowed to retry.
+///
+/// NOTE: "blockhash not found" is intentionally treated as *retriable* — under
+/// RPC pressure a valid blockhash can expire before the tx reaches a leader;
+/// a fresh retry fetches a new blockhash and usually succeeds.
+fn is_retriable_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    !lower.contains("invalid mint")
+        && !lower.contains("insufficient funds")
+        && !lower.contains("insufficient lamports")
+        && !lower.contains("already processed")
+}
+
 /// Configuration for the order manager
 #[derive(Debug, Clone)]
 pub struct OrderManagerConfig {
@@ -38,7 +55,7 @@ impl Default for OrderManagerConfig {
             max_pending_orders: 100,
             order_timeout: Duration::from_secs(30),
             max_retries: 3,
-            retry_delay: Duration::from_secs(1),
+            retry_delay: Duration::from_millis(200),
             max_position_size_sol: 10.0,
             max_portfolio_exposure_sol: 100.0,
             max_daily_loss_sol: 5.0,
@@ -176,6 +193,9 @@ impl OrderManager {
             // Daily loss tracking requires a DB table (Task #11); 0.0 for now.
             current_daily_loss_sol: 0.0,
             config_version: &self.config_version_hash,
+            // Bonding curve not fetched at submit time — price-impact check is
+            // deferred to the execution-gate where we have a live pool snapshot.
+            bonding_curve_params: None,
         });
 
         // Self-healing resume: if the decision engine is still in auto-paused latch
@@ -308,9 +328,29 @@ impl OrderManager {
         self.metrics.active_orders.inc();
         self.metrics.pending_orders.dec();
 
+        // Parse mint early — required before the bonding curve fetch that feeds
+        // the execution-gate DecisionEngine call.
+        let mint = match Pubkey::from_str(&order.mint) {
+            Ok(p) => p,
+            Err(e) => {
+                order.status = OrderStatus::Failed;
+                order.error = Some(format!("Invalid mint: {}", e));
+                order.updated_at = Utc::now();
+                self.finalize_order(order).await?;
+                return Err(OrderError::ExecutionError("Invalid mint".into()));
+            }
+        };
+
         // Execution-time Decision Engine gate (includes MEV sandwich risk)
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+
+        // Fetch live bonding-curve params for dynamic slippage validation in
+        // DecisionEngine.  Best-effort: on failure the price-impact check is
+        // skipped and execution falls back to static slippage.
+        let bonding_curve_params =
+            self.pumpfun_client.get_bonding_curve_params(&mint).await.ok();
+
         // Exclude the current order from the exposure sum — it was already inserted into
         // active_orders above, so subtracting avoids double-counting it against the limit.
         let current_exposure_sol = {
@@ -332,6 +372,7 @@ impl OrderManager {
             current_portfolio_exposure_sol: current_exposure_sol,
             current_daily_loss_sol: 0.0,
             config_version: &self.config_version_hash,
+            bonding_curve_params: bonding_curve_params.as_ref(),
         });
         if self.decision_engine.take_needs_db_pause() {
             let pool = self.db_pool.pool.clone();
@@ -365,21 +406,11 @@ impl OrderManager {
         self.update_order_status(&order).await?;
         self.emit_event(&order);
 
-        let mint = match Pubkey::from_str(&order.mint) {
-            Ok(p) => p,
-            Err(e) => {
-                order.status = OrderStatus::Failed;
-                order.error = Some(format!("Invalid mint: {}", e));
-                order.updated_at = Utc::now();
-                self.finalize_order(order).await?;
-                return Err(OrderError::ExecutionError("Invalid mint".into()));
-            }
-        };
-
         // Execute within the configured timeout; fail the order if it exceeds it.
+        // Pass the already-fetched bonding curve params to avoid a redundant RPC call.
         let result = tokio::time::timeout(
             self.config.order_timeout,
-            self.execute_with_mev_protection(&mint, &order),
+            self.execute_with_mev_protection(&mint, &order, bonding_curve_params),
         )
         .await
         .unwrap_or_else(|_| {
@@ -397,7 +428,8 @@ impl OrderManager {
                 self.metrics.order_execution_time.observe(start.elapsed().as_secs_f64());
             }
             Err(e) => {
-                if order.retry_count < self.config.max_retries {
+                let err_str = e.to_string();
+                if order.retry_count < self.config.max_retries && is_retriable_error(&err_str) {
                     order.retry_count += 1;
                     // Exponential backoff: base_delay * 2^(attempt-1)
                     let backoff = self.config.retry_delay
@@ -407,7 +439,7 @@ impl OrderManager {
                         attempt = order.retry_count,
                         max_retries = self.config.max_retries,
                         backoff_ms = backoff.as_millis(),
-                        error = %e,
+                        reason = %err_str,
                         "Order failed, retrying with exponential backoff"
                     );
                     order.status = OrderStatus::Pending;
@@ -419,8 +451,15 @@ impl OrderManager {
                     self.metrics.active_orders.dec();
                     return Ok(());
                 }
+                warn!(
+                    order_id = %order.id,
+                    attempt = order.retry_count + 1,
+                    reason = %err_str,
+                    retriable = is_retriable_error(&err_str),
+                    "Order failed — not retrying"
+                );
                 order.status = OrderStatus::Failed;
-                order.error = Some(e.to_string());
+                order.error = Some(err_str);
                 order.updated_at = Utc::now();
                 self.metrics.orders_failed.inc();
             }
@@ -477,18 +516,23 @@ impl OrderManager {
     }
 
     /// Execute a trade, preferring Jito bundle submission when MEV protection is enabled.
-    /// On Jito failure waits 2 seconds and retries the bundle once before falling back to
-    /// direct RPC. Slippage bounds are computed dynamically from the bonding curve.
+    /// On Jito failure (both internal retry attempts), falls back to direct RPC.
+    /// Slippage bounds are resolved from the pre-fetched bonding curve snapshot
+    /// (passed by the caller) to avoid a redundant RPC round-trip.
     async fn execute_with_mev_protection(
         &self,
         mint: &Pubkey,
         order: &Order,
+        bonding_curve_params: Option<crate::pumpfun::bonding_curve::BondingCurveParams>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let (max_cost, min_output) = self.compute_slippage_bounds(mint, order).await;
+        // Resolve slippage bounds from the pre-fetched snapshot (or static fallback).
+        let (dynamic_max_cost, dynamic_min_output) = Self::resolve_slippage_bounds(
+            order, bonding_curve_params.as_ref(),
+        );
 
         if self.mev_enabled {
             if let Some(jito) = &self.jito_client {
-                match self.execute_via_jito(mint, order, jito.clone(), max_cost, min_output).await {
+                match self.execute_via_jito(mint, order, jito.clone(), dynamic_max_cost, dynamic_min_output).await {
                     Ok(sig) => {
                         self.metrics.jito_bundles_landed.inc();
                         info!(order_id = %order.id, sig = %sig, "executed via Jito bundle");
@@ -498,79 +542,121 @@ impl OrderManager {
                         warn!(
                             order_id = %order.id,
                             error = %e,
-                            "Jito bundle failed; retrying once after 2s"
+                            "Jito bundle failed (both attempts); falling back to RPC"
                         );
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        match self.execute_via_jito(mint, order, jito.clone(), max_cost, min_output).await {
-                            Ok(sig) => {
-                                self.metrics.jito_bundles_landed.inc();
-                                info!(order_id = %order.id, sig = %sig, attempt = 2, "executed via Jito bundle (retry)");
-                                return Ok(sig);
-                            }
-                            Err(e2) => {
-                                warn!(
-                                    order_id = %order.id,
-                                    error = %e2,
-                                    "Jito retry also failed; falling back to RPC"
-                                );
-                            }
-                        }
                     }
                 }
             }
         }
 
-        // Direct RPC fallback
+        // Direct RPC fallback — use pre-computed bounds.
+        info!(
+            order_id = %order.id,
+            max_sol_cost = dynamic_max_cost,
+            min_sol_output = dynamic_min_output,
+            "Dynamic slippage bounds applied for RPC execution"
+        );
         match order.side {
             OrderSide::Buy => {
-                self.pumpfun_client.buy_token(mint, order.amount, max_cost, order.slippage_bps).await
+                self.pumpfun_client.buy_token(mint, order.amount, dynamic_max_cost, order.slippage_bps).await
             }
             OrderSide::Sell => {
-                self.pumpfun_client.sell_token(mint, order.amount, min_output, order.slippage_bps).await
+                self.pumpfun_client.sell_token(mint, order.amount, dynamic_min_output, order.slippage_bps).await
             }
         }
     }
 
+    /// Compute `(max_sol_cost, min_sol_output)` from a bonding-curve snapshot when
+    /// available, falling back to static slippage when the snapshot is absent.
+    fn resolve_slippage_bounds(
+        order: &Order,
+        bonding_curve_params: Option<&crate::pumpfun::bonding_curve::BondingCurveParams>,
+    ) -> (u64, u64) {
+        if let Some(params) = bonding_curve_params {
+            params.calculate_price_impact(order.amount, order.slippage_bps)
+        } else {
+            let mc = order.amount + order.amount * order.slippage_bps / 10_000;
+            let mo = order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000);
+            (mc, mo)
+        }
+    }
+
     /// Build and submit a Jito MEV bundle for the given order.
-    /// `max_cost` / `min_output` are pre-computed dynamic slippage bounds.
+    /// `dynamic_max_cost` / `dynamic_min_output` are pre-computed slippage bounds from the
+    /// bonding curve snapshot. On `send_bundle()` error or bundle status "failed", the engine
+    /// waits 2 seconds and retries once before returning an error (which causes the
+    /// caller to fall back to direct RPC submission).
     async fn execute_via_jito(
         &self,
         mint: &Pubkey,
         order: &Order,
         jito: Arc<JitoClient>,
-        max_cost: u64,
-        min_output: u64,
+        dynamic_max_cost: u64,
+        dynamic_min_output: u64,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Fixed tip: 0.001 % of trade value, minimum 5 000 lamports
+        let max_cost = order.max_cost.unwrap_or(dynamic_max_cost);
+        let min_output = order.min_output.unwrap_or(dynamic_min_output);
+        // Fixed tip: 0.001% of trade value, minimum 5,000 lamports
         let trade_sol = order.amount as f64 / 1_000_000_000.0;
         let tip_lamports = ((trade_sol * 0.001 * 1_000_000_000.0) as u64).max(5_000);
 
-        let (trade_tx, _blockhash) = match order.side {
-            OrderSide::Buy => {
-                self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+        // Attempt Jito bundle submission — retries once on any rejection before giving up.
+        // Rejection includes both send_bundle() transport errors and bundle status "failed".
+        for jito_attempt in 0u32..2 {
+            if jito_attempt > 0 {
+                warn!(
+                    order_id = %order.id,
+                    jito_attempt,
+                    "Jito bundle rejected, retrying after 2 s"
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            OrderSide::Sell => {
-                self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
-            }
-        };
 
-        let bundle_id = jito.send_bundle(vec![trade_tx]).await?;
-        info!(order_id = %order.id, bundle_id = %bundle_id, tip_lamports, "Jito bundle submitted");
+            let (trade_tx, _blockhash) = match order.side {
+                OrderSide::Buy => {
+                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                }
+                OrderSide::Sell => {
+                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                }
+            };
 
-        for _ in 0..5 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            match jito.get_bundle_status(&bundle_id).await {
-                Ok(status) if status == "confirmed" || status == "finalized" => {
-                    return Ok(bundle_id);
+            // send_bundle() failure is treated as a rejection — retry once then give up.
+            let bundle_id = match jito.send_bundle(vec![trade_tx]).await {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(order_id = %order.id, jito_attempt, reason = %e, tip_lamports, "Jito send_bundle error (treated as rejection)");
+                    continue;
                 }
-                Ok(status) if status == "failed" => {
-                    return Err(format!("Jito bundle {} failed (status={})", bundle_id, status).into());
+            };
+
+            info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, tip_lamports, "Jito bundle submitted");
+
+            // Poll for bundle status (up to 5 seconds).
+            let mut bundle_failed = false;
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                match jito.get_bundle_status(&bundle_id).await {
+                    Ok(status) if status == "confirmed" || status == "finalized" => {
+                        info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, "Jito bundle landed");
+                        return Ok(bundle_id);
+                    }
+                    Ok(status) if status == "failed" => {
+                        bundle_failed = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+
+            if !bundle_failed {
+                // Polling timed out — return bundle_id as pseudo-signature for optimistic tracking.
+                return Ok(bundle_id);
+            }
+            // bundle_failed=true → loop to retry (jito_attempt 0→1) or fall through to Err
         }
 
-        Ok(bundle_id)
+        Err(format!("Jito bundle failed after 2 attempt(s) for order {}", order.id).into())
     }
 
     async fn finalize_order(&self, order: Order) -> Result<(), OrderError> {
@@ -806,8 +892,28 @@ impl OrderManagerMinimal {
         self.metrics.active_orders.inc();
         self.metrics.pending_orders.dec();
 
+        // Parse mint early — required before the bonding curve fetch that feeds
+        // the execution-gate DecisionEngine call.
+        let mint = match solana_sdk::pubkey::Pubkey::from_str(&order.mint) {
+            Ok(p) => p,
+            Err(_) => {
+                order.status = OrderStatus::Failed;
+                order.error = Some("Invalid mint address".into());
+                order.updated_at = Utc::now();
+                self.finalize_order_minimal(order).await?;
+                return Ok(());
+            }
+        };
+
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+
+        // Fetch live bonding-curve params for dynamic slippage validation in
+        // DecisionEngine.  Best-effort: on failure the price-impact check is
+        // skipped and execution falls back to static slippage.
+        let bonding_curve_params =
+            self.pumpfun_client.get_bonding_curve_params(&mint).await.ok();
+
         // Exclude the current order from the exposure sum — it was already inserted into
         // active_orders above, so subtracting avoids double-counting it against the limit.
         let current_exposure_sol = {
@@ -829,6 +935,7 @@ impl OrderManagerMinimal {
             current_portfolio_exposure_sol: current_exposure_sol,
             current_daily_loss_sol: 0.0,
             config_version: &self.config_version_hash,
+            bonding_curve_params: bonding_curve_params.as_ref(),
         });
         if self.decision_engine.take_needs_db_pause() {
             let pool = self.db_pool.pool.clone();
@@ -860,38 +967,40 @@ impl OrderManagerMinimal {
         order.updated_at = Utc::now();
         self.emit_event_minimal(&order);
 
-        let mint = match solana_sdk::pubkey::Pubkey::from_str(&order.mint) {
-            Ok(p) => p,
-            Err(_) => {
-                order.status = OrderStatus::Failed;
-                order.error = Some("Invalid mint address".into());
-                order.updated_at = Utc::now();
-                self.finalize_order_minimal(order).await?;
-                return Ok(());
-            }
+        // Compute slippage bounds once from the already-fetched snapshot so we
+        // don't re-fetch inside the execution functions.
+        let (dynamic_max_cost, dynamic_min_output) = if let Some(ref params) = bonding_curve_params {
+            params.calculate_price_impact(order.amount, order.slippage_bps)
+        } else {
+            let mc = order.amount + order.amount * order.slippage_bps / 10_000;
+            let mo = order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000);
+            (mc, mo)
         };
+        let max_cost = order.max_cost.unwrap_or(dynamic_max_cost);
+        let min_output = order.min_output.unwrap_or(dynamic_min_output);
 
         // Execute within the configured timeout; fail the order if it exceeds the limit.
+        // mint was already parsed early; no second Pubkey::from_str needed here.
         let result = tokio::time::timeout(
             self.config.order_timeout,
             async {
                 if self.mev_enabled {
                     if let Some(jito) = &self.jito_client {
-                        match self.execute_via_jito_minimal(&mint, &order, jito.clone()).await {
+                        match self.execute_via_jito_minimal(&mint, &order, jito.clone(), max_cost, min_output).await {
                             Ok(sig) => {
                                 self.metrics.jito_bundles_landed.inc();
                                 Ok(sig)
                             }
                             Err(e) => {
                                 warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
-                                self.execute_direct(&mint, &order).await
+                                self.execute_direct(&mint, &order, max_cost, min_output).await
                             }
                         }
                     } else {
-                        self.execute_direct(&mint, &order).await
+                        self.execute_direct(&mint, &order, max_cost, min_output).await
                     }
                 } else {
-                    self.execute_direct(&mint, &order).await
+                    self.execute_direct(&mint, &order, max_cost, min_output).await
                 }
             },
         )
@@ -911,18 +1020,35 @@ impl OrderManagerMinimal {
                 self.metrics.order_execution_time.observe(start.elapsed().as_secs_f64());
             }
             Err(e) => {
-                if order.retry_count < self.config.max_retries {
+                let err_str = e.to_string();
+                if order.retry_count < self.config.max_retries && is_retriable_error(&err_str) {
+                    let backoff = self.config.retry_delay * 2u32.pow(order.retry_count);
+                    warn!(
+                        order_id = %order.id,
+                        attempt = order.retry_count + 1,
+                        max_attempts = self.config.max_retries + 1,
+                        reason = %err_str,
+                        backoff_ms = backoff.as_millis(),
+                        "Order execution failed, scheduling retry with exponential backoff"
+                    );
                     order.retry_count += 1;
                     order.status = OrderStatus::Pending;
-                    tokio::time::sleep(self.config.retry_delay).await;
+                    tokio::time::sleep(backoff).await;
                     let _ = self.order_tx.send(order.clone());
                     let mut active = self.active_orders.write().await;
                     active.remove(&order.id);
                     self.metrics.active_orders.dec();
                     return Ok(());
                 }
+                warn!(
+                    order_id = %order.id,
+                    attempt = order.retry_count + 1,
+                    reason = %err_str,
+                    retriable = is_retriable_error(&err_str),
+                    "Order failed — not retrying"
+                );
                 order.status = OrderStatus::Failed;
-                order.error = Some(e.to_string());
+                order.error = Some(err_str);
                 order.updated_at = Utc::now();
                 self.metrics.orders_failed.inc();
             }
@@ -931,60 +1057,90 @@ impl OrderManagerMinimal {
         self.finalize_order_minimal(order).await
     }
 
+    /// Submit a trade directly via RPC using pre-computed slippage bounds.
     async fn execute_direct(
         &self,
         mint: &Pubkey,
         order: &Order,
+        max_cost: u64,
+        min_output: u64,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         match order.side {
             OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
                 self.pumpfun_client.buy_token(mint, order.amount, max_cost, order.slippage_bps).await
             }
             OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
-                );
                 self.pumpfun_client.sell_token(mint, order.amount, min_output, order.slippage_bps).await
             }
         }
     }
 
+    /// Build and submit a Jito MEV bundle with pre-computed slippage bounds.
+    ///
+    /// On bundle rejection — whether from `send_bundle()` returning an error
+    /// **or** from the bundle status API reporting "failed" — the engine waits
+    /// 2 seconds and retries once before returning an error (which causes the
+    /// caller to fall back to direct RPC submission).
     async fn execute_via_jito_minimal(
         &self,
         mint: &Pubkey,
         order: &Order,
         jito: Arc<JitoClient>,
+        max_cost: u64,
+        min_output: u64,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let (trade_tx, _blockhash) = match order.side {
-            OrderSide::Buy => {
-                let max_cost = order.max_cost.unwrap_or(order.amount + order.amount * order.slippage_bps / 10_000);
-                self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
-            }
-            OrderSide::Sell => {
-                let min_output = order.min_output.unwrap_or(
-                    order.amount.saturating_sub(order.amount * order.slippage_bps / 10_000),
+        // Attempt Jito bundle submission — retries once on any rejection before giving up.
+        // Rejection includes both send_bundle() transport errors and bundle status "failed".
+        for jito_attempt in 0u32..2 {
+            if jito_attempt > 0 {
+                warn!(
+                    order_id = %order.id,
+                    jito_attempt,
+                    "Jito bundle rejected, retrying after 2 s"
                 );
-                self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-        };
 
-        let bundle_id = jito.send_bundle(vec![trade_tx]).await?;
+            let (trade_tx, _blockhash) = match order.side {
+                OrderSide::Buy => {
+                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                }
+                OrderSide::Sell => {
+                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                }
+            };
 
-        for _ in 0..5 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            match jito.get_bundle_status(&bundle_id).await {
-                Ok(status) if status == "confirmed" || status == "finalized" => {
-                    return Ok(bundle_id);
+            // send_bundle() failure is treated as a rejection — retry once then give up.
+            let bundle_id = match jito.send_bundle(vec![trade_tx]).await {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(order_id = %order.id, jito_attempt, reason = %e, "Jito send_bundle error (treated as rejection)");
+                    continue; // will sleep 2 s at the start of the next iteration (or exit loop)
                 }
-                Ok(status) if status == "failed" => {
-                    return Err(format!("Jito bundle {} failed", bundle_id).into());
+            };
+
+            let mut bundle_failed = false;
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                match jito.get_bundle_status(&bundle_id).await {
+                    Ok(status) if status == "confirmed" || status == "finalized" => {
+                        info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, "Jito bundle landed");
+                        return Ok(bundle_id);
+                    }
+                    Ok(status) if status == "failed" => {
+                        bundle_failed = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+
+            if !bundle_failed {
+                return Ok(bundle_id);
             }
         }
 
-        Ok(bundle_id)
+        Err(format!("Jito bundle failed after 2 attempt(s) for order {}", order.id).into())
     }
 
     async fn finalize_order_minimal(&self, order: Order) -> Result<(), crate::order::OrderError> {

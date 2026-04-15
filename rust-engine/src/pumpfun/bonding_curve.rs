@@ -123,4 +123,52 @@ impl BondingCurveParams {
         let min_sol_output = sol_out.saturating_sub(sol_out * applied_bps / 10_000);
         (sol_out, price_impact_bps, min_sol_output)
     }
+
+    /// Compute the SOL cost required to buy exactly `token_amount` tokens,
+    /// using the constant-product formula (ceiling division to ensure the
+    /// on-chain instruction never undershoots the required payment).
+    ///
+    /// Returns `u64::MAX` when the pool cannot satisfy the request (e.g. the
+    /// pool is exhausted or `token_amount >= virtual_token_reserves`).
+    pub fn sol_cost_for_tokens(&self, token_amount: u64) -> u64 {
+        if token_amount == 0 || self.complete {
+            return 0;
+        }
+        let v_tok = self.virtual_token_reserves as u128;
+        let v_sol = self.virtual_sol_reserves as u128;
+        let t = token_amount as u128;
+        if t >= v_tok {
+            return u64::MAX;
+        }
+        // Constant product: sol_in = V_sol * t / (V_tok - t)   [ceiling]
+        let numerator = v_sol.saturating_mul(t);
+        let denominator = v_tok - t;
+        let sol_in = (numerator + denominator - 1) / denominator;
+        sol_in.min(u64::MAX as u128) as u64
+    }
+
+    /// Compute dynamic slippage bounds for both buy and sell sides based on
+    /// the current pool depth and the requested slippage tolerance.
+    ///
+    /// For a **buy** of `token_amount` tokens:
+    ///   `max_sol_cost` = exact SOL cost (price-impact included) + slippage buffer
+    ///
+    /// For a **sell** of `token_amount` tokens:
+    ///   `min_sol_output` = expected SOL output (price-impact included) − slippage buffer
+    ///
+    /// Returns `(max_sol_cost, min_sol_output)`.
+    pub fn calculate_price_impact(&self, token_amount: u64, slippage_bps: u64) -> (u64, u64) {
+        let expected_sol_cost = self.sol_cost_for_tokens(token_amount);
+        let max_sol_cost = if expected_sol_cost == u64::MAX {
+            u64::MAX
+        } else {
+            expected_sol_cost.saturating_add(expected_sol_cost * slippage_bps / 10_000)
+        };
+
+        let expected_sol_out = self.sol_for_tokens(token_amount);
+        let min_sol_output = expected_sol_out
+            .saturating_sub(expected_sol_out * slippage_bps / 10_000);
+
+        (max_sol_cost, min_sol_output)
+    }
 }

@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tracing::{info, warn, error};
 
 use crate::order::Order;
+use crate::pumpfun::bonding_curve::BondingCurveParams;
 
 /// The authoritative outcome for every trade request.
 /// All execution paths must call `evaluate()` and obey this blindly.
@@ -50,6 +51,12 @@ pub struct DecisionContext<'a> {
     pub current_daily_loss_sol: f64,
     /// Opaque config snapshot identifier for audit logs.
     pub config_version: &'a str,
+    /// Live bonding-curve snapshot used for dynamic slippage validation.
+    /// When Some, `evaluate()` calls `calculate_price_impact()` and rejects
+    /// any order whose explicit `max_cost` / `min_output` falls outside the
+    /// computed price-impact bounds.  None skips the dynamic check (e.g. at
+    /// submission time before the pool depth is known).
+    pub bonding_curve_params: Option<&'a BondingCurveParams>,
 }
 
 /// The single Decision Engine — the only authority that can approve or deny a trade.
@@ -196,6 +203,49 @@ impl DecisionEngine {
                     ctx.sandwich_risk_score, ctx.max_sandwich_risk_score
                 ),
             });
+        }
+
+        // Dynamic slippage validation using live bonding-curve pool depth.
+        // Only runs when bonding_curve_params are supplied (execution-gate only).
+        if let Some(params) = ctx.bonding_curve_params {
+            let (dynamic_max_cost, dynamic_min_output) =
+                params.calculate_price_impact(order.amount, order.slippage_bps);
+
+            info!(
+                decision = "CHECK",
+                wallet_id = ctx.wallet_id,
+                order_id = order.id,
+                dynamic_max_sol_cost = dynamic_max_cost,
+                dynamic_min_sol_output = dynamic_min_output,
+                "DecisionEngine: dynamic slippage bounds from bonding curve"
+            );
+
+            // Reject if an explicit max_cost is set but is below the computed
+            // minimum safe cost (price already moved beyond tolerance).
+            if let Some(max_cost) = order.max_cost {
+                if max_cost < dynamic_max_cost {
+                    return self.on_reject(ctx, Decision::Reject {
+                        reason: format!(
+                            "explicit max_sol_cost={} is below computed price-impact cost={}; \
+                             pool depth has moved, increase slippage tolerance or reduce size",
+                            max_cost, dynamic_max_cost
+                        ),
+                    });
+                }
+            }
+
+            // Reject if an explicit min_output is set but exceeds what the pool can deliver.
+            if let Some(min_output) = order.min_output {
+                if min_output > dynamic_min_output {
+                    return self.on_reject(ctx, Decision::Reject {
+                        reason: format!(
+                            "explicit min_sol_output={} exceeds computed pool output={}; \
+                             pool depth has moved, reduce minimum or size",
+                            min_output, dynamic_min_output
+                        ),
+                    });
+                }
+            }
         }
 
         self.consecutive_rejects.store(0, Ordering::Release);
