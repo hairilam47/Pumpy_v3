@@ -304,16 +304,17 @@ impl OrderManager {
             config_version: &self.config_version_hash,
         });
         if !exec_decision.is_allow() {
-            order.status = OrderStatus::Failed;
-            order.error = Some(format!(
+            let reason = format!(
                 "DecisionEngine {}: {}",
                 exec_decision.label(),
                 exec_decision.reason()
-            ));
+            );
+            order.status = OrderStatus::Failed;
+            order.error = Some(reason.clone());
             order.updated_at = Utc::now();
             self.finalize_order(order).await?;
             self.metrics.orders_rejected.inc();
-            return Err(OrderError::SandwichRiskTooHigh(risk.score));
+            return Err(OrderError::ExecutionError(reason));
         }
 
         order.status = OrderStatus::Executing;
@@ -721,12 +722,13 @@ impl OrderManagerMinimal {
             config_version: &self.config_version_hash,
         });
         if !exec_decision.is_allow() {
-            order.status = OrderStatus::Failed;
-            order.error = Some(format!(
+            let reason = format!(
                 "DecisionEngine {}: {}",
                 exec_decision.label(),
                 exec_decision.reason()
-            ));
+            );
+            order.status = OrderStatus::Failed;
+            order.error = Some(reason);
             order.updated_at = Utc::now();
             self.finalize_order_minimal(order).await?;
             return Ok(());
