@@ -225,6 +225,21 @@ pub async fn load_db_config(pool: &DbPool) -> std::collections::HashMap<String, 
     }
 }
 
+/// Load system_config key–value pairs. Used for operator-set parameters like
+/// auto_pause_threshold that are stored in system_config (not bot_config).
+pub async fn load_system_config(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    match sqlx::query_as::<_, ConfigRow>("SELECT key, value FROM system_config")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(|r| (r.key, r.value)).collect(),
+        Err(e) => {
+            tracing::warn!("Could not load system_config from DB: {}", e);
+            std::collections::HashMap::new()
+        }
+    }
+}
+
 /// Load all wallets from the registry for startup logging and multi-wallet orchestration.
 /// Returns public rows only — keypair_path is NOT included.
 pub async fn load_wallet_registry(pool: &DbPool) -> Vec<WalletRegistryRow> {

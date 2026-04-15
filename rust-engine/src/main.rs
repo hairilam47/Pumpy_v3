@@ -187,7 +187,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Applying {} runtime override(s) from bot_config", db_overrides.len());
                 config.apply_db_overrides(&db_overrides);
             }
-            if let Some(v) = db_overrides.get("auto_pause_threshold").or_else(|| db_overrides.get("AUTO_PAUSE_THRESHOLD")) {
+            // auto_pause_threshold lives in system_config (seeded by migration).
+            // Also check bot_config for operator overrides (lowercase key).
+            let sys_config = database::load_system_config(&pool.pool).await;
+            let threshold_str = sys_config.get("auto_pause_threshold")
+                .or_else(|| db_overrides.get("auto_pause_threshold"))
+                .or_else(|| db_overrides.get("AUTO_PAUSE_THRESHOLD"));
+            if let Some(v) = threshold_str {
                 if let Ok(n) = v.parse::<u32>() {
                     auto_pause_threshold = n;
                     info!("auto_pause_threshold set to {} from system_config", n);

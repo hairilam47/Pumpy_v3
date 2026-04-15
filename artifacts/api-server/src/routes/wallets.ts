@@ -5,8 +5,23 @@ import { requireAdminKey } from "../lib/admin-auth.js";
 
 const router = Router();
 
+const PYTHON_API = process.env.PYTHON_API_URL ?? "http://localhost:8001";
+
 const VALID_PRESETS = new Set(["conservative", "balanced", "aggressive"]);
 const VALID_STATUSES = new Set(["enabled", "paused", "halted"]);
+
+const PRESET_PARAMS: Record<string, {
+  risk_per_trade_sol: number;
+  stop_loss_pct: number;
+  take_profit_pct: number;
+  max_positions: number;
+}> = {
+  conservative: { risk_per_trade_sol: 0.05, stop_loss_pct: 5, take_profit_pct: 20, max_positions: 2 },
+  balanced:     { risk_per_trade_sol: 0.15, stop_loss_pct: 10, take_profit_pct: 50, max_positions: 5 },
+  aggressive:   { risk_per_trade_sol: 0.5,  stop_loss_pct: 20, take_profit_pct: 100, max_positions: 10 },
+};
+
+// ─── GET /api/wallets ─────────────────────────────────────────────────────────
 
 router.get("/wallets", async (_req, res) => {
   try {
@@ -28,6 +43,8 @@ router.get("/wallets", async (_req, res) => {
   }
 });
 
+// ─── GET /api/wallets/:id/config ──────────────────────────────────────────────
+
 router.get("/wallets/:id/config", async (req, res) => {
   const { id } = req.params;
   try {
@@ -47,6 +64,8 @@ router.get("/wallets/:id/config", async (req, res) => {
     res.status(500).json({ error: "Failed to load wallet config" });
   }
 });
+
+// ─── PUT /api/wallets/:id/config — admin-gated ────────────────────────────────
 
 router.put("/wallets/:id/config", requireAdminKey, async (req, res) => {
   const { id } = req.params;
@@ -129,7 +148,72 @@ router.put("/wallets/:id/config", requireAdminKey, async (req, res) => {
   }
 });
 
-router.post("/wallets/:id/pause", requireAdminKey, async (req, res) => {
+// ─── PUT /api/strategy/preset ─────────────────────────────────────────────────
+// Sets the strategy risk preset for wallet_001 (or a specific wallet).
+// Always persists to wallet_config in DB; also notifies Python engine
+// for in-memory strategy param update (best-effort, does not fail the request).
+
+router.put("/strategy/preset", async (req, res) => {
+  const body = req.body as { preset?: string; wallet_id?: string };
+  const preset = body.preset;
+  const walletId = body.wallet_id ?? "wallet_001";
+
+  if (!preset || !VALID_PRESETS.has(preset)) {
+    res.status(400).json({ error: "preset must be conservative, balanced, or aggressive" });
+    return;
+  }
+
+  const params = PRESET_PARAMS[preset]!;
+
+  try {
+    // Ensure wallet_config row exists (upsert), then apply the preset params.
+    const updated = await db
+      .update(walletConfigTable)
+      .set({
+        strategyPreset: preset,
+        riskPerTradeSol: params.risk_per_trade_sol,
+        updatedAt: new Date(),
+      })
+      .where(eq(walletConfigTable.walletId, walletId))
+      .returning();
+
+    if (updated.length === 0) {
+      res.status(404).json({ error: `Wallet config for '${walletId}' not found` });
+      return;
+    }
+
+    // Notify Python engine for in-memory update (best-effort).
+    try {
+      const pyResp = await fetch(`${PYTHON_API}/api/strategy/preset`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset, wallet_id: walletId }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!pyResp.ok) {
+        console.warn(`PUT /strategy/preset: Python engine returned ${pyResp.status}; DB updated, in-memory update skipped`);
+      }
+    } catch (pyErr) {
+      console.warn("PUT /strategy/preset: Python engine unreachable; DB updated, in-memory update skipped", pyErr);
+    }
+
+    res.json({ ok: true, preset, walletId, params });
+  } catch (err) {
+    console.error("PUT /strategy/preset error:", err);
+    res.status(500).json({ error: "Failed to save preset" });
+  }
+});
+
+// ─── GET /api/strategy/preset — preset definitions (read-only) ───────────────
+
+router.get("/strategy/preset", (_req, res) => {
+  res.json(PRESET_PARAMS);
+});
+
+// ─── POST /api/wallets/:id/pause — no admin key required ─────────────────────
+// Pause is a user-initiated safety action; no secret required in the dashboard.
+
+router.post("/wallets/:id/pause", async (req, res) => {
   const { id } = req.params;
   try {
     await db.transaction(async (tx) => {
@@ -151,7 +235,10 @@ router.post("/wallets/:id/pause", requireAdminKey, async (req, res) => {
   }
 });
 
-router.post("/wallets/:id/resume", requireAdminKey, async (req, res) => {
+// ─── POST /api/wallets/:id/resume — no admin key required ────────────────────
+// Resume is a user-initiated recovery action from auto-pause; no secret needed.
+
+router.post("/wallets/:id/resume", async (req, res) => {
   const { id } = req.params;
   try {
     await db.transaction(async (tx) => {
@@ -172,6 +259,9 @@ router.post("/wallets/:id/resume", requireAdminKey, async (req, res) => {
     res.status(500).json({ error: "Failed to resume wallet" });
   }
 });
+
+// ─── POST /api/wallets/:id/halt — admin-gated ────────────────────────────────
+// Halt is a permanent (destructive) action; admin key is required.
 
 router.post("/wallets/:id/halt", requireAdminKey, async (req, res) => {
   const { id } = req.params;

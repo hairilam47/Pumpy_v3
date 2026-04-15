@@ -315,6 +315,18 @@ impl OrderManager {
             current_daily_loss_sol: 0.0,
             config_version: &self.config_version_hash,
         });
+        if self.decision_engine.take_needs_db_pause() {
+            let pool = self.db_pool.pool.clone();
+            let wid = self.wallet_pubkey.clone();
+            let halt_reason = match &exec_decision {
+                Decision::Halt { reason } => reason.clone(),
+                _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
+            };
+            tokio::spawn(async move {
+                database::pause_wallet(&pool, &wid, &halt_reason).await;
+            });
+        }
+
         if !exec_decision.is_allow() {
             let reason = format!(
                 "DecisionEngine {}: {}",
@@ -732,6 +744,18 @@ impl OrderManagerMinimal {
             current_daily_loss_sol: 0.0,
             config_version: &self.config_version_hash,
         });
+        if self.decision_engine.take_needs_db_pause() {
+            let pool = self.db_pool.pool.clone();
+            let wid = self.wallet_pubkey.clone();
+            let halt_reason = match &exec_decision {
+                Decision::Halt { reason } => reason.clone(),
+                _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
+            };
+            tokio::spawn(async move {
+                database::pause_wallet(&pool, &wid, &halt_reason).await;
+            });
+        }
+
         if !exec_decision.is_allow() {
             let reason = format!(
                 "DecisionEngine {}: {}",

@@ -86,20 +86,12 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
   const { data: config } = useWalletConfig(wallet.walletId);
   const [resuming, setResuming] = useState(false);
 
-  const adminKey = (document.cookie
-    .split("; ")
-    .find((r) => r.startsWith("admin_key="))
-    ?.split("=")[1]) ?? "";
-
   const resumeMutation = useMutation({
     mutationFn: async () => {
       setResuming(true);
       const res = await fetch(`/api/wallets/${wallet.walletId}/resume`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-Key": adminKey,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
       if (!res.ok) {

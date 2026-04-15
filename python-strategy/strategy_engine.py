@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from typing import Dict, List, Optional
 import structlog
@@ -20,6 +21,29 @@ signal_latency = Histogram("strategy_signal_latency_seconds", "Signal generation
 
 _prometheus_started = False
 
+PRESET_PARAMS: Dict[str, Dict] = {
+    "conservative": {
+        "buy_amount_sol": 0.05,
+        "stop_loss_pct": 5.0,
+        "take_profit_pct": 20.0,
+        "max_positions": 2,
+    },
+    "balanced": {
+        "buy_amount_sol": 0.15,
+        "stop_loss_pct": 10.0,
+        "take_profit_pct": 50.0,
+        "max_positions": 5,
+    },
+    "aggressive": {
+        "buy_amount_sol": 0.5,
+        "stop_loss_pct": 20.0,
+        "take_profit_pct": 100.0,
+        "max_positions": 10,
+    },
+}
+
+PRESET_REFRESH_CYCLES = 12
+
 
 def _start_prometheus():
     global _prometheus_started
@@ -40,6 +64,7 @@ class StrategyEngine:
     3. Generates ML-based signals
     4. Submits orders back to the Rust engine via gRPC
     5. Exposes Prometheus metrics on port 9092
+    6. Reads strategy_preset from wallet_config and applies risk params to strategies
     """
 
     def __init__(self):
@@ -59,6 +84,12 @@ class StrategyEngine:
         self._win_count = 0
         self._total_pnl_sol = 0.0
 
+        self._active_preset: str = "balanced"
+        self._scan_cycle: int = 0
+
+        self._express_api = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
+        self._wallet_id: str = "wallet_001"
+
     async def start(self):
         logger.info("Starting strategy engine")
         self.running = True
@@ -66,6 +97,10 @@ class StrategyEngine:
         _start_prometheus()
 
         await self.grpc_client.connect()
+
+        # Load preset from wallet_config at startup so strategies use the
+        # correct risk params from the very first evaluation cycle.
+        await self._refresh_preset_from_wallet_config()
 
         self._scan_task = asyncio.create_task(self._market_scan_loop())
         await self.data_collector.start()
@@ -83,6 +118,53 @@ class StrategyEngine:
         await self.grpc_client.disconnect()
         logger.info("Strategy engine stopped")
 
+    def _apply_preset(self, preset: str) -> None:
+        """Apply risk parameters from a named preset to all strategies immediately."""
+        params = PRESET_PARAMS.get(preset)
+        if params is None:
+            logger.warning("Unknown preset, keeping current params", preset=preset)
+            return
+
+        changed = preset != self._active_preset
+        self._active_preset = preset
+
+        for strategy in self.strategies:
+            if hasattr(strategy, "buy_amount_sol"):
+                strategy.buy_amount_sol = params["buy_amount_sol"]
+            if hasattr(strategy, "stop_loss_pct"):
+                strategy.stop_loss_pct = params["stop_loss_pct"]
+            if hasattr(strategy, "take_profit_pct"):
+                strategy.take_profit_pct = params["take_profit_pct"]
+
+        if changed:
+            logger.info(
+                "Strategy preset applied",
+                preset=preset,
+                buy_amount_sol=params["buy_amount_sol"],
+                stop_loss_pct=params["stop_loss_pct"],
+                take_profit_pct=params["take_profit_pct"],
+            )
+
+    async def _refresh_preset_from_wallet_config(self) -> None:
+        """
+        Fetch wallet_config.strategy_preset from the Express API and apply it.
+        Called at startup and periodically — errors are logged but never raised.
+        """
+        try:
+            import aiohttp
+            url = f"{self._express_api}/api/wallets/{self._wallet_id}/config"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        preset = data.get("strategyPreset") or data.get("strategy_preset") or "balanced"
+                        self._apply_preset(preset)
+                    elif resp.status == 404:
+                        logger.debug("wallet_config not found, using default preset", wallet_id=self._wallet_id)
+                        self._apply_preset("balanced")
+        except Exception as exc:
+            logger.debug("Could not refresh preset from wallet_config", error=str(exc))
+
     async def _on_token_event(self, token: TokenMarketData):
         """Callback from the data collector — add new tokens to tracked set."""
         if token.mint not in self.tracked_tokens:
@@ -99,6 +181,11 @@ class StrategyEngine:
     async def _market_scan_loop(self):
         while self.running:
             try:
+                self._scan_cycle += 1
+                # Refresh preset from wallet_config every PRESET_REFRESH_CYCLES cycles
+                # (avoids a DB/HTTP call on every 2-second scan tick).
+                if self._scan_cycle % PRESET_REFRESH_CYCLES == 0:
+                    await self._refresh_preset_from_wallet_config()
                 await self._run_strategies()
             except asyncio.CancelledError:
                 break
@@ -209,6 +296,7 @@ class StrategyEngine:
             "strategies": self.get_strategy_stats(),
             "data_collector": self.data_collector.get_stats(),
             "grpc_connected": self.grpc_client.connected,
+            "active_preset": self._active_preset,
         }
 
     def _seed_mock_tokens(self):
