@@ -609,7 +609,6 @@ impl OrderManager {
         snipe_amount_lamports: u64,
     ) {
         let mut rx = pumpfun_client.subscribe_token_events();
-        let order_tx = self.order_tx.clone();
 
         loop {
             match rx.recv().await {
@@ -620,7 +619,8 @@ impl OrderManager {
                     );
 
                     if auto_snipe {
-                        // Auto-submit a sniper buy order for newly discovered tokens
+                        // Route through submit_order so the DecisionEngine gates the order
+                        // before it enters the queue — consistent with all other order ingestion paths.
                         let order = super::Order {
                             id: uuid::Uuid::new_v4().to_string(),
                             mint: event.mint.clone(),
@@ -643,10 +643,9 @@ impl OrderManager {
                             executed_amount: None,
                             metadata: std::collections::HashMap::new(),
                         };
-                        if let Err(e) = order_tx.send(order) {
-                            warn!("Failed to queue sniper order for {}: {}", event.mint, e);
-                        } else {
-                            info!("Sniper order queued for new token: {}", event.mint);
+                        match self.submit_order(order).await {
+                            Ok(id) => info!("Sniper order {} queued for new token: {}", id, event.mint),
+                            Err(e) => warn!("Sniper order rejected for {}: {}", event.mint, e),
                         }
                     }
                 }
