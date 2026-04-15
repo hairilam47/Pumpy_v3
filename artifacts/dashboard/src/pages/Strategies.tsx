@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Shield, Loader2, AlertTriangle, CheckCircle2, Zap, TrendingUp } from "lucide-react";
+import { Shield, Loader2, AlertTriangle, CheckCircle2, Zap, TrendingUp, KeyRound, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 
@@ -89,16 +90,19 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { data: config, isLoading } = useWalletConfig(wallet.walletId);
-  const [saving, setSaving] = useState<PresetId | null>(null);
+  const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
+  const [adminKey, setAdminKey] = useState("");
 
   const activePreset = (config?.strategyPreset ?? "balanced") as PresetId;
 
   const changePreset = useMutation({
-    mutationFn: async (preset: PresetId) => {
-      setSaving(preset);
+    mutationFn: async ({ preset, key }: { preset: PresetId; key: string }) => {
       const res = await fetch("/api/strategy/preset", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Key": key,
+        },
         body: JSON.stringify({ preset, wallet_id: wallet.walletId }),
       });
       if (!res.ok) {
@@ -107,14 +111,16 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
       }
       return res.json();
     },
-    onSuccess: (_data, preset) => {
+    onSuccess: (_data, { preset }) => {
       toast({ title: `Preset changed to ${preset} for ${wallet.walletId}` });
+      setPendingPreset(null);
+      setAdminKey("");
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to change preset", description: err.message, variant: "destructive" });
+      setAdminKey("");
     },
-    onSettled: () => setSaving(null),
   });
 
   return (
@@ -140,22 +146,28 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
             Loading config…
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {PRESETS.map((preset) => {
               const Icon = preset.icon;
               const isActive = activePreset === preset.id;
-              const isSaving = saving === preset.id;
+              const isPending = pendingPreset === preset.id;
 
               return (
                 <button
                   key={preset.id}
-                  onClick={() => !isActive && changePreset.mutate(preset.id)}
-                  disabled={changePreset.isPending}
+                  onClick={() => {
+                    if (!isActive && !pendingPreset) {
+                      setPendingPreset(preset.id);
+                    }
+                  }}
+                  disabled={changePreset.isPending || !!pendingPreset}
                   className={cn(
                     "relative rounded-xl border p-4 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
-                    isActive ? preset.activeAccent : cn(preset.accent, "hover:brightness-110 cursor-pointer"),
+                    isActive ? preset.activeAccent : cn(preset.accent, !pendingPreset && "hover:brightness-110 cursor-pointer"),
                     isActive && "cursor-default",
-                    changePreset.isPending && !isSaving && "opacity-60",
+                    isPending && "ring-2 ring-primary/60",
+                    !!pendingPreset && !isPending && !isActive && "opacity-50",
                   )}
                 >
                   {isActive && (
@@ -185,14 +197,14 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   <p className="text-xs text-muted-foreground leading-relaxed">{preset.description}</p>
                   {!isActive && (
                     <div className="mt-3">
-                      {isSaving ? (
+                      {isPending && changePreset.isPending ? (
                         <div className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Loader2 className="w-3 h-3 animate-spin" />
                           Applying…
                         </div>
                       ) : (
                         <span className={cn("text-xs font-medium", preset.labelColor)}>
-                          Select →
+                          {isPending ? "Selected — enter key below" : "Select →"}
                         </span>
                       )}
                     </div>
@@ -204,6 +216,49 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
               );
             })}
           </div>
+
+          {/* Admin key prompt — shown when a non-active preset is selected */}
+          {pendingPreset && (
+            <div className="mt-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 space-y-2">
+              <p className="text-xs text-muted-foreground">
+                Changing to{" "}
+                <span className="font-semibold text-foreground capitalize">{pendingPreset}</span>{" "}
+                preset requires admin authorization.
+              </p>
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-primary flex-shrink-0" />
+                <Input
+                  type="password"
+                  placeholder="Enter admin key…"
+                  value={adminKey}
+                  onChange={(e) => setAdminKey(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && adminKey) changePreset.mutate({ preset: pendingPreset, key: adminKey });
+                    if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); }
+                  }}
+                  className="h-7 text-xs flex-1"
+                  autoFocus
+                />
+                <Button
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => changePreset.mutate({ preset: pendingPreset, key: adminKey })}
+                  disabled={!adminKey || changePreset.isPending}
+                >
+                  {changePreset.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Apply"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0"
+                  onClick={() => { setPendingPreset(null); setAdminKey(""); }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
+          </>
         )}
       </CardContent>
     </Card>

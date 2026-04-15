@@ -148,12 +148,11 @@ router.put("/wallets/:id/config", requireAdminKey, async (req, res) => {
   }
 });
 
-// ─── PUT /api/strategy/preset ─────────────────────────────────────────────────
-// Sets the strategy risk preset for wallet_001 (or a specific wallet).
-// Always persists to wallet_config in DB; also notifies Python engine
-// for in-memory strategy param update (best-effort, does not fail the request).
+// ─── PUT /api/strategy/preset — admin-gated ──────────────────────────────────
+// Changes live risk posture (position size, stop-loss, take-profit) for a
+// wallet. Admin key is required to prevent unauthorized strategy mutations.
 
-router.put("/strategy/preset", async (req, res) => {
+router.put("/strategy/preset", requireAdminKey, async (req, res) => {
   const body = req.body as { preset?: string; wallet_id?: string };
   const preset = body.preset;
   const walletId = body.wallet_id ?? "wallet_001";

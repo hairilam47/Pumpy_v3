@@ -240,6 +240,19 @@ pub async fn load_system_config(pool: &DbPool) -> std::collections::HashMap<Stri
     }
 }
 
+/// Resolve a logical wallet_id by its Solana public key.
+/// Returns None if not found or on DB error; callers should default to "wallet_001".
+pub async fn get_wallet_id_by_pubkey(pool: &DbPool, pubkey: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT wallet_id FROM wallet_registry WHERE owner_pubkey = $1 LIMIT 1",
+    )
+    .bind(pubkey)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Fetch the current execution status of a wallet from wallet_registry.
 /// Returns None if the wallet is not found or on DB error.
 pub async fn get_wallet_status(pool: &DbPool, wallet_id: &str) -> Option<String> {

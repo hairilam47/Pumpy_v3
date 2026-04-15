@@ -238,8 +238,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.trading.mev_protection_enabled,
     ));
 
-    let decision_engine = Arc::new(DecisionEngine::new());
-    info!("Decision Engine initialized");
+    // Resolve primary wallet_id from the DB (matches wallet_registry.wallet_id).
+    // Used so auto-pause writes update the correct row. Falls back to "wallet_001".
+    let primary_pubkey = primary_pumpfun_client.pubkey().to_string();
+    let primary_wallet_id = database::get_wallet_id_by_pubkey(&db_pool.pool, &primary_pubkey)
+        .await
+        .unwrap_or_else(|| {
+            info!("Primary pubkey not found in wallet_registry; defaulting wallet_id to wallet_001");
+            "wallet_001".to_string()
+        });
+    info!(wallet_id = %primary_wallet_id, "Primary wallet_id resolved");
+
+    // Use system-config-driven threshold so auto-pause behaviour is consistent
+    // between the primary engine and per-wallet worker engines.
+    let decision_engine = Arc::new(DecisionEngine::with_threshold(auto_pause_threshold));
+    info!(auto_pause_threshold, "Decision Engine initialized");
 
     let order_config = OrderManagerConfig {
         max_pending_orders: 100,
@@ -263,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.trading.mev_protection_enabled,
         decision_engine,
         config.demo_mode,
-        "primary".to_string(),
+        primary_wallet_id,
     ));
 
     // gRPC control-plane shim: consumes primary OrderManager queue for BotService::submit_order.
