@@ -2,11 +2,11 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Wallet, CheckCircle, XCircle, PauseCircle, Play, Loader2,
-  AlertTriangle, RefreshCw, Shield,
+  AlertTriangle, RefreshCw, Shield, KeyRound, X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -84,14 +84,17 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { data: config } = useWalletConfig(wallet.walletId);
-  const [resuming, setResuming] = useState(false);
+  const [showKeyPrompt, setShowKeyPrompt] = useState(false);
+  const [adminKey, setAdminKey] = useState("");
 
   const resumeMutation = useMutation({
-    mutationFn: async () => {
-      setResuming(true);
+    mutationFn: async (key: string) => {
       const res = await fetch(`/api/wallets/${wallet.walletId}/resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Key": key,
+        },
         body: JSON.stringify({}),
       });
       if (!res.ok) {
@@ -102,6 +105,8 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
     },
     onSuccess: () => {
       toast({ title: `Wallet ${wallet.walletId} resumed` });
+      setShowKeyPrompt(false);
+      setAdminKey("");
       void qc.invalidateQueries({ queryKey: ["wallets"] });
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
@@ -111,8 +116,8 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
         description: err.message,
         variant: "destructive",
       });
+      setAdminKey("");
     },
-    onSettled: () => setResuming(false),
   });
 
   const effectiveStatus = config?.status ?? wallet.status;
@@ -165,28 +170,62 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
         </div>
 
         {effectiveStatus === "paused" && (
-          <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="text-xs text-yellow-400 font-medium">Wallet auto-paused</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Paused due to repeated decision engine rejections. Resume once the underlying issue is resolved.
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="shrink-0 text-xs h-7 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
-              onClick={() => resumeMutation.mutate()}
-              disabled={resuming || resumeMutation.isPending}
-            >
-              {resuming ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Play className="w-3.5 h-3.5" />
+          <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-yellow-400 font-medium">Wallet auto-paused</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Paused due to repeated decision engine rejections. Resume once the underlying issue is resolved.
+                </p>
+              </div>
+              {!showKeyPrompt && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0 text-xs h-7 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
+                  onClick={() => setShowKeyPrompt(true)}
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span className="ml-1.5">Resume</span>
+                </Button>
               )}
-              <span className="ml-1.5">Resume</span>
-            </Button>
+            </div>
+            {showKeyPrompt && (
+              <div className="flex items-center gap-2 pt-1">
+                <KeyRound className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                <Input
+                  type="password"
+                  placeholder="Enter admin key…"
+                  value={adminKey}
+                  onChange={(e) => setAdminKey(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && adminKey) resumeMutation.mutate(adminKey);
+                    if (e.key === "Escape") { setShowKeyPrompt(false); setAdminKey(""); }
+                  }}
+                  className="h-7 text-xs flex-1"
+                  autoFocus
+                />
+                <Button
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => resumeMutation.mutate(adminKey)}
+                  disabled={!adminKey || resumeMutation.isPending}
+                >
+                  {resumeMutation.isPending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : "Confirm"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0"
+                  onClick={() => { setShowKeyPrompt(false); setAdminKey(""); }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            )}
           </div>
         )}
 

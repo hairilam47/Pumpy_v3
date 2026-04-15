@@ -97,6 +97,16 @@ impl DecisionEngine {
         self.auto_paused.load(Ordering::Acquire)
     }
 
+    /// Reset all auto-pause state. Call when an operator manually resumes a wallet.
+    /// Clears the consecutive-reject counter, lifts the auto_paused latch, and
+    /// discards any pending needs_db_pause flag so the next order can be evaluated
+    /// cleanly.
+    pub fn reset_pause(&self) {
+        self.consecutive_rejects.store(0, Ordering::Release);
+        self.auto_paused.store(false, Ordering::Release);
+        self.needs_db_pause.store(false, Ordering::Release);
+    }
+
     /// Evaluate a trade request and return the authoritative Decision.
     ///
     /// Rules applied in priority order:

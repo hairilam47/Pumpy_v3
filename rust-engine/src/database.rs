@@ -240,6 +240,19 @@ pub async fn load_system_config(pool: &DbPool) -> std::collections::HashMap<Stri
     }
 }
 
+/// Fetch the current execution status of a wallet from wallet_registry.
+/// Returns None if the wallet is not found or on DB error.
+pub async fn get_wallet_status(pool: &DbPool, wallet_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT status FROM wallet_registry WHERE wallet_id = $1",
+    )
+    .bind(wallet_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Load all wallets from the registry for startup logging and multi-wallet orchestration.
 /// Returns public rows only — keypair_path is NOT included.
 pub async fn load_wallet_registry(pool: &DbPool) -> Vec<WalletRegistryRow> {

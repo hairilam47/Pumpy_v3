@@ -194,6 +194,7 @@ impl WalletWorker {
             self.mev_protection_enabled,
             decision_engine,
             false, // keypair was loaded — not demo mode
+            wallet_id.clone(),
         ));
 
         // ── Internal JoinSet: tracks all child sub-tasks ───────────────────

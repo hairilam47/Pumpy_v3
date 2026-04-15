@@ -263,6 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.trading.mev_protection_enabled,
         decision_engine,
         config.demo_mode,
+        "primary".to_string(),
     ));
 
     // gRPC control-plane shim: consumes primary OrderManager queue for BotService::submit_order.

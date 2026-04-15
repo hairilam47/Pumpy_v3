@@ -235,10 +235,11 @@ router.post("/wallets/:id/pause", async (req, res) => {
   }
 });
 
-// ─── POST /api/wallets/:id/resume — no admin key required ────────────────────
-// Resume is a user-initiated recovery action from auto-pause; no secret needed.
+// ─── POST /api/wallets/:id/resume — admin-gated ──────────────────────────────
+// Resuming a paused wallet re-enables live trading; admin key is required to
+// prevent unauthenticated callers from lifting a safety pause.
 
-router.post("/wallets/:id/resume", async (req, res) => {
+router.post("/wallets/:id/resume", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   try {
     await db.transaction(async (tx) => {

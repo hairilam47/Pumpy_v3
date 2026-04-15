@@ -1,193 +1,257 @@
-import { useListStrategies, useUpdateStrategy } from "@workspace/api-client-react";
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Bot, Zap, TrendingUp, Brain, ToggleLeft, ToggleRight,
-  Shield, ChevronRight,
-} from "lucide-react";
-import { cn, formatPercent } from "@/lib/utils";
-import { Link } from "wouter";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Shield, Loader2, AlertTriangle, CheckCircle2, Zap, TrendingUp } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
-const STRATEGY_ICONS: Record<string, React.ElementType> = {
-  sniper: Zap,
-  momentum: TrendingUp,
-  ml: Brain,
-};
+interface WalletEntry {
+  walletId: string;
+  status: string;
+}
 
-const STRATEGY_DESCRIPTIONS: Record<string, string> = {
-  sniper: "Identifies and buys newly launched tokens in the first minutes after creation, targeting early bonding curve stages before momentum builds.",
-  momentum: "Detects tokens with strong price and volume momentum using ML signals and enters positions to capture trend continuation.",
-};
+interface WalletConfig {
+  walletId: string;
+  strategyPreset: string;
+  status: string;
+  riskPerTradeSol: number;
+  dailyLossLimitSol: number;
+}
 
-const PRESET_META: Record<string, { label: string; color: string; detail: string }> = {
-  conservative: {
+const PRESETS = [
+  {
+    id: "conservative",
     label: "Conservative",
-    color: "bg-blue-500/15 text-blue-400 border-blue-500/30",
-    detail: "0.05 SOL/trade · 5% stop · 20% target",
+    icon: Shield,
+    risk: "Low risk",
+    params: { buy: "0.05 SOL", stop: "5%", target: "20%" },
+    description: "Small positions with tight stops. Best for volatile markets or when starting out.",
+    accent: "border-blue-500/40 bg-blue-500/5",
+    activeAccent: "border-blue-500 bg-blue-500/15 ring-1 ring-blue-500/30",
+    labelColor: "text-blue-400",
+    riskColor: "bg-blue-500/15 text-blue-400",
   },
-  balanced: {
+  {
+    id: "balanced",
     label: "Balanced",
-    color: "bg-primary/15 text-primary border-primary/30",
-    detail: "0.15 SOL/trade · 10% stop · 50% target",
+    icon: TrendingUp,
+    risk: "Medium risk",
+    params: { buy: "0.15 SOL", stop: "10%", target: "50%" },
+    description: "Moderate position sizes with a balanced risk/reward ratio. Recommended default.",
+    accent: "border-primary/40 bg-primary/5",
+    activeAccent: "border-primary bg-primary/15 ring-1 ring-primary/30",
+    labelColor: "text-primary",
+    riskColor: "bg-primary/15 text-primary",
   },
-  aggressive: {
+  {
+    id: "aggressive",
     label: "Aggressive",
-    color: "bg-orange-500/15 text-orange-400 border-orange-500/30",
-    detail: "0.5 SOL/trade · 20% stop · 100% target",
+    icon: Zap,
+    risk: "High risk",
+    params: { buy: "0.5 SOL", stop: "20%", target: "100%" },
+    description: "Large positions targeting high returns. Higher drawdown risk — use with caution.",
+    accent: "border-orange-500/40 bg-orange-500/5",
+    activeAccent: "border-orange-500 bg-orange-500/15 ring-1 ring-orange-500/30",
+    labelColor: "text-orange-400",
+    riskColor: "bg-orange-500/15 text-orange-400",
   },
-};
+] as const;
 
-function useActivePreset() {
-  return useQuery<{ preset: string }>({
-    queryKey: ["activePreset"],
+type PresetId = typeof PRESETS[number]["id"];
+
+function useWallets() {
+  return useQuery<WalletEntry[]>({
+    queryKey: ["wallets"],
     queryFn: async () => {
-      const res = await fetch("/api/wallets/wallet_001/config");
-      if (!res.ok) return { preset: "balanced" };
-      const data = (await res.json()) as { strategyPreset?: string };
-      return { preset: data.strategyPreset ?? "balanced" };
+      const res = await fetch("/api/wallets");
+      if (!res.ok) throw new Error("Failed to fetch wallets");
+      return res.json() as Promise<WalletEntry[]>;
+    },
+    refetchInterval: 15_000,
+  });
+}
+
+function useWalletConfig(walletId: string) {
+  return useQuery<WalletConfig>({
+    queryKey: ["walletConfig", walletId],
+    queryFn: async () => {
+      const res = await fetch(`/api/wallets/${walletId}/config`);
+      if (!res.ok) return { walletId, strategyPreset: "balanced", status: "enabled", riskPerTradeSol: 0.15, dailyLossLimitSol: 1 };
+      return res.json() as Promise<WalletConfig>;
     },
     staleTime: 10_000,
     refetchInterval: 30_000,
   });
 }
 
-export default function StrategiesPage() {
+function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
+  const { toast } = useToast();
   const qc = useQueryClient();
-  const { data: strategies, isLoading } = useListStrategies();
-  const updateStrategy = useUpdateStrategy();
-  const { data: presetData } = useActivePreset();
+  const { data: config, isLoading } = useWalletConfig(wallet.walletId);
+  const [saving, setSaving] = useState<PresetId | null>(null);
 
-  const activePreset = presetData?.preset ?? "balanced";
-  const presetMeta = PRESET_META[activePreset] ?? PRESET_META.balanced;
+  const activePreset = (config?.strategyPreset ?? "balanced") as PresetId;
 
-  const handleToggle = async (name: string, currentEnabled: boolean) => {
-    try {
-      await updateStrategy.mutateAsync({
-        strategyName: name,
-        data: { enabled: !currentEnabled },
+  const changePreset = useMutation({
+    mutationFn: async (preset: PresetId) => {
+      setSaving(preset);
+      const res = await fetch("/api/strategy/preset", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset, wallet_id: wallet.walletId }),
       });
-      qc.invalidateQueries({ queryKey: ["/api/bot/strategies"] });
-    } catch (e) {
-      console.error(e);
-    }
-  };
+      if (!res.ok) {
+        const err = (await res.json()) as { error: string };
+        throw new Error(err.error ?? "Failed to change preset");
+      }
+      return res.json();
+    },
+    onSuccess: (_data, preset) => {
+      toast({ title: `Preset changed to ${preset} for ${wallet.walletId}` });
+      void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to change preset", description: err.message, variant: "destructive" });
+    },
+    onSettled: () => setSaving(null),
+  });
 
-  if (isLoading) {
-    return <div className="text-muted-foreground text-sm">Loading strategies...</div>;
-  }
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm flex items-center gap-2 font-mono">
+          <Shield className="w-4 h-4 text-primary flex-shrink-0" />
+          {wallet.walletId}
+          {wallet.status !== "enabled" && (
+            <span className={cn(
+              "ml-auto text-xs px-2 py-0.5 rounded-full font-sans font-medium",
+              wallet.status === "paused" ? "bg-yellow-500/15 text-yellow-400" : "bg-red-500/15 text-red-400"
+            )}>
+              {wallet.status}
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Loading config…
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {PRESETS.map((preset) => {
+              const Icon = preset.icon;
+              const isActive = activePreset === preset.id;
+              const isSaving = saving === preset.id;
+
+              return (
+                <button
+                  key={preset.id}
+                  onClick={() => !isActive && changePreset.mutate(preset.id)}
+                  disabled={changePreset.isPending}
+                  className={cn(
+                    "relative rounded-xl border p-4 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                    isActive ? preset.activeAccent : cn(preset.accent, "hover:brightness-110 cursor-pointer"),
+                    isActive && "cursor-default",
+                    changePreset.isPending && !isSaving && "opacity-60",
+                  )}
+                >
+                  {isActive && (
+                    <CheckCircle2 className="absolute top-2.5 right-2.5 w-4 h-4 text-primary" />
+                  )}
+                  <div className="flex items-center gap-2 mb-2">
+                    <Icon className={cn("w-4 h-4", preset.labelColor)} />
+                    <span className={cn("text-sm font-semibold", preset.labelColor)}>{preset.label}</span>
+                  </div>
+                  <span className={cn("inline-block text-xs px-1.5 py-0.5 rounded-full font-medium mb-2", preset.riskColor)}>
+                    {preset.risk}
+                  </span>
+                  <div className="space-y-0.5 mb-3">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Position size</span>
+                      <span className="font-medium tabular-nums">{preset.params.buy}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Stop loss</span>
+                      <span className="font-medium tabular-nums text-red-400">{preset.params.stop}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Take profit</span>
+                      <span className="font-medium tabular-nums text-green-400">{preset.params.target}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{preset.description}</p>
+                  {!isActive && (
+                    <div className="mt-3">
+                      {isSaving ? (
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Applying…
+                        </div>
+                      ) : (
+                        <span className={cn("text-xs font-medium", preset.labelColor)}>
+                          Select →
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {isActive && (
+                    <div className="mt-3 text-xs font-medium text-primary">Active preset</div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+export default function StrategiesPage() {
+  const { data: wallets, isLoading, error } = useWallets();
 
   return (
     <div className="space-y-4 sm:space-y-6">
       <div>
-        <h1 className="text-lg font-bold">Strategy Configurator</h1>
+        <h1 className="text-lg font-bold">Trading Strategy Preset</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Enable or disable trading strategies. Risk parameters are controlled by the active preset.
+          Select a risk profile for each wallet. The preset controls position size, stop-loss, and take-profit targets across all strategies.
         </p>
       </div>
 
-      {/* Active Preset Banner */}
-      <div className={cn(
-        "rounded-xl border px-4 py-3 flex items-center justify-between gap-4",
-        presetMeta.color,
-      )}>
-        <div className="flex items-center gap-3">
-          <Shield className="w-5 h-5 flex-shrink-0" />
-          <div>
-            <div className="text-sm font-semibold">
-              Active preset: {presetMeta.label}
-            </div>
-            <div className="text-xs opacity-75 mt-0.5">{presetMeta.detail}</div>
-          </div>
+      {isLoading && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground animate-pulse">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Loading wallets…
         </div>
-        <Link
-          href="/settings"
-          className="flex items-center gap-1 text-xs font-medium opacity-80 hover:opacity-100 transition-opacity shrink-0"
-        >
-          Change
-          <ChevronRight className="w-3.5 h-3.5" />
-        </Link>
-      </div>
+      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {(strategies as { name: string; enabled: boolean; tradesExecuted: number; winRate: number; totalPnlSol: number; buyAmountSol?: number }[] | undefined)?.map((s) => {
-          const Icon = STRATEGY_ICONS[s.name] ?? Bot;
-          return (
-            <div key={s.name} className={cn(
-              "bg-card border rounded-xl p-4 sm:p-5 transition-all",
-              s.enabled ? "border-primary/40" : "border-border opacity-80"
-            )}>
-              {/* Header */}
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <div className={cn("p-2 rounded-lg flex-shrink-0", s.enabled ? "bg-primary/10" : "bg-secondary")}>
-                    <Icon className={cn("w-5 h-5", s.enabled ? "text-primary" : "text-muted-foreground")} />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold capitalize">{s.name}</h3>
-                    <span className={cn("text-xs", s.enabled ? "text-primary" : "text-muted-foreground")}>
-                      {s.enabled ? "Active" : "Disabled"}
-                    </span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleToggle(s.name, s.enabled)}
-                  disabled={updateStrategy.isPending}
-                  className="transition-transform hover:scale-110 active:scale-95 p-1 min-h-[44px] min-w-[44px] flex items-center justify-center"
-                  title={s.enabled ? "Disable strategy" : "Enable strategy"}
-                >
-                  {s.enabled ? (
-                    <ToggleRight className="w-8 h-8 text-primary" />
-                  ) : (
-                    <ToggleLeft className="w-8 h-8 text-muted-foreground" />
-                  )}
-                </button>
-              </div>
+      {error && (
+        <div className="flex items-center gap-2 text-sm text-destructive">
+          <AlertTriangle className="w-4 h-4" />
+          Failed to load wallets — API server may be offline.
+        </div>
+      )}
 
-              {/* Description */}
-              <p className="text-xs text-muted-foreground mb-4 leading-relaxed">
-                {STRATEGY_DESCRIPTIONS[s.name] ?? "Advanced trading strategy."}
-              </p>
+      {wallets && wallets.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+            No wallets registered. Register a wallet to configure its strategy preset.
+          </CardContent>
+        </Card>
+      )}
 
-              {/* Stats */}
-              <div className="grid grid-cols-3 gap-3 mb-4">
-                <div className="text-center">
-                  <div className="text-lg font-bold tabular-nums">{s.tradesExecuted}</div>
-                  <div className="text-xs text-muted-foreground">Trades</div>
-                </div>
-                <div className="text-center">
-                  <div className={cn("text-lg font-bold tabular-nums",
-                    s.winRate > 50 ? "text-green-400" : s.winRate > 0 ? "text-amber-400" : "text-muted-foreground"
-                  )}>
-                    {formatPercent(s.winRate)}
-                  </div>
-                  <div className="text-xs text-muted-foreground">Win Rate</div>
-                </div>
-                <div className="text-center">
-                  <div className={cn("text-lg font-bold tabular-nums",
-                    s.totalPnlSol >= 0 ? "text-green-400" : "text-red-400"
-                  )}>
-                    {s.totalPnlSol >= 0 ? "+" : ""}{s.totalPnlSol.toFixed(3)}
-                  </div>
-                  <div className="text-xs text-muted-foreground">PnL (SOL)</div>
-                </div>
-              </div>
+      {wallets?.map((w) => (
+        <WalletPresetCard key={w.walletId} wallet={w} />
+      ))}
 
-              {/* Preset indicator at bottom */}
-              <div className="border-t border-border pt-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">Risk profile</span>
-                  <span className={cn(
-                    "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border",
-                    presetMeta.color,
-                  )}>
-                    <Shield className="w-2.5 h-2.5" />
-                    {presetMeta.label}
-                  </span>
-                </div>
-              </div>
-            </div>
-          );
-        })}
+      <div className="rounded-lg bg-muted/30 border border-border/40 px-4 py-3 text-xs text-muted-foreground space-y-1">
+        <p className="font-medium text-foreground/70">About presets</p>
+        <p>Presets apply immediately to new signals. Open positions are not affected until their own stop or target is hit.</p>
+        <p>The Python strategy engine re-reads the active preset every 12 scan cycles to stay in sync.</p>
       </div>
     </div>
   );

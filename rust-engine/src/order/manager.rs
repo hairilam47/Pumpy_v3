@@ -66,6 +66,10 @@ pub struct OrderManager {
     demo_mode: bool,
     /// Real wallet public key used as audit identity in every DecisionEngine log.
     wallet_pubkey: String,
+    /// Logical wallet_id (e.g. "wallet_001") matching wallet_registry.wallet_id.
+    /// Used for all DB writes (pause_wallet, get_wallet_status) so that updates
+    /// land on the correct row — wallet_pubkey is the Solana address, not the PK.
+    wallet_id: String,
     /// Deterministic fingerprint of current risk-limit config for audit logs.
     config_version_hash: String,
 }
@@ -93,6 +97,7 @@ impl OrderManager {
         mev_enabled: bool,
         decision_engine: Arc<DecisionEngine>,
         demo_mode: bool,
+        wallet_id: String,
     ) -> Self {
         let (order_tx, order_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(1000);
@@ -117,6 +122,7 @@ impl OrderManager {
             decision_engine,
             demo_mode,
             wallet_pubkey,
+            wallet_id,
             config_version_hash,
         }
     }
@@ -172,9 +178,20 @@ impl OrderManager {
             config_version: &self.config_version_hash,
         });
 
+        // Self-healing resume: if the decision engine is still in auto-paused latch
+        // but the DB wallet status has been manually flipped back to "enabled" by an
+        // operator, reset the in-memory state so orders can flow again.
+        if self.decision_engine.is_auto_paused() {
+            let db_status = database::get_wallet_status(&self.db_pool.pool, &self.wallet_id).await;
+            if db_status.as_deref() == Some("enabled") {
+                self.decision_engine.reset_pause();
+                info!(wallet_id = %self.wallet_id, "DecisionEngine auto-pause reset: wallet resumed in DB");
+            }
+        }
+
         if self.decision_engine.take_needs_db_pause() {
             let pool = self.db_pool.pool.clone();
-            let wid = self.wallet_pubkey.clone();
+            let wid = self.wallet_id.clone();
             let halt_reason = match &decision {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded".to_string(),
@@ -317,7 +334,7 @@ impl OrderManager {
         });
         if self.decision_engine.take_needs_db_pause() {
             let pool = self.db_pool.pool.clone();
-            let wid = self.wallet_pubkey.clone();
+            let wid = self.wallet_id.clone();
             let halt_reason = match &exec_decision {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
@@ -619,6 +636,7 @@ impl OrderManager {
             decision_engine: self.decision_engine.clone(),
             demo_mode: self.demo_mode,
             wallet_pubkey: self.wallet_pubkey.clone(),
+            wallet_id: self.wallet_id.clone(),
             config_version_hash: self.config_version_hash.clone(),
         }
     }
@@ -705,6 +723,8 @@ struct OrderManagerMinimal {
     decision_engine: Arc<DecisionEngine>,
     demo_mode: bool,
     wallet_pubkey: String,
+    /// Logical wallet_id for DB writes. Must match wallet_registry.wallet_id.
+    wallet_id: String,
     config_version_hash: String,
 }
 
@@ -746,7 +766,7 @@ impl OrderManagerMinimal {
         });
         if self.decision_engine.take_needs_db_pause() {
             let pool = self.db_pool.pool.clone();
-            let wid = self.wallet_pubkey.clone();
+            let wid = self.wallet_id.clone();
             let halt_reason = match &exec_decision {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
