@@ -36,9 +36,7 @@ use wallet_worker::{WalletWorker, WalletWorkerConfig, MAX_RESTART_ATTEMPTS};
 enum BuildOutcome {
     /// Successfully built — ready to spawn.
     Built(WalletWorker),
-    /// No keypair_path configured — normal; primary path handles this wallet.
-    NoPath,
-    /// keypair_path configured but unreadable/invalid — track as a failure.
+    /// keypair_path missing or invalid — track as a failure; caller should halt wallet.
     Failed(String),
 }
 
@@ -69,16 +67,23 @@ impl WorkerFactory {
     ///
     /// Returns:
     /// - `Built(worker)` — keypair loaded and worker ready to spawn.
-    /// - `NoPath`        — no keypair_path configured; primary path handles this wallet.
-    /// - `Failed(msg)`   — keypair_path configured but unreadable or malformed.
+    /// - `Failed(msg)`   — no keypair_path, or path unreadable/malformed.
     ///                     Caller should track failures and halt after N attempts.
+    ///
+    /// NOTE: all enabled registry entries are expected to have a usable keypair_path.
+    ///       Entries without one are a configuration error and must be halted, not silently
+    ///       skipped — which is why this function no longer returns a NoPath variant.
     fn build(&self, entry: WalletFullEntry) -> BuildOutcome {
         let wallet_id = entry.wallet_id.clone();
 
         let kp_path = match &entry.keypair_path {
             Some(p) if !p.is_empty() => p.clone(),
             _ => {
-                return BuildOutcome::NoPath;
+                // enabled wallet has no keypair_path — configuration error
+                return BuildOutcome::Failed(format!(
+                    "enabled wallet '{}' has no keypair_path configured",
+                    wallet_id
+                ));
             }
         };
 
@@ -142,6 +147,23 @@ impl WorkerFactory {
     }
 }
 
+/// Materialize the given keypair bytes as a JSON array to a temp file and return the path.
+/// Used when KEYPAIR_PATH is not set so that wallet_001 can still be spawned as a WalletWorker.
+fn materialize_keypair_to_tmp(keypair_bytes: &[u8], label: &str) -> Option<String> {
+    let path = format!("/tmp/{}.json", label);
+    let json = serde_json::to_string(&keypair_bytes.to_vec()).unwrap_or_default();
+    match std::fs::write(&path, &json) {
+        Ok(_) => {
+            info!(path = %path, "Keypair materialized to temp file (not persisted across restarts)");
+            Some(path)
+        }
+        Err(e) => {
+            warn!("Could not write keypair to temp file '{}': {}", path, e);
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
@@ -158,10 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("gRPC port: {}", config.grpc_port);
     info!("Metrics port: {}", config.metrics_port);
     if config.demo_mode {
-        warn!("┌─────────────────────────────────────────────────────────────┐");
-        warn!("│  DEMO MODE: no wallet configured — trade execution disabled │");
-        warn!("│  Set WALLET_PRIVATE_KEY in Replit Secrets to enable trading │");
-        warn!("└─────────────────────────────────────────────────────────────┘");
+        warn!("╔═════════════════════════════════════════════════════════════╗");
+        warn!("║  DEMO MODE — ephemeral keypair generated, trading disabled ║");
+        warn!("║  Set WALLET_PRIVATE_KEY in Replit Secrets to trade live.   ║");
+        warn!("╚═════════════════════════════════════════════════════════════╝");
     }
 
     // ── Prometheus metrics ────────────────────────────────────────────────
@@ -205,16 +227,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("RPC manager initialized with {} endpoints", config.rpc_endpoints.len());
 
     // ── Primary PumpFun client ────────────────────────────────────────────
-    // Two roles:
-    //   (1) WebSocket token monitor — broadcasts discovered tokens to all workers.
-    //   (2) gRPC management plane — BotService pubkey, portfolio queries, order submission.
+    // Owns the env-var / ephemeral keypair; shared with:
+    //   (1) WebSocket monitor (token discovery, broadcast to workers)
+    //   (2) BotService gRPC control-plane (pubkey, portfolio queries)
+    //   (3) Primary OrderManager / execution workers (gRPC order execution shim)
     let primary_pumpfun_client = Arc::new(
         PumpFunClient::new(rpc_manager.clone(), config.keypair_bytes.clone())
             .map_err(|e| format!("PumpFun client error: {}", e))?,
     );
     info!("Primary PumpFun client: wallet={}", primary_pumpfun_client.pubkey());
 
-    // ── Primary MEV + Decision Engine + OrderManager ──────────────────────
+    // ── Primary MEV + Decision Engine + OrderManager (gRPC shim) ─────────
+    // This order manager exists solely as a backwards-compatibility shim for
+    // BotService::submit_order.  All auto-snipe execution runs inside WalletWorkers.
     let jito_client_opt: Option<Arc<crate::mev::JitoClient>> = config
         .jito_bundle_url
         .as_ref()
@@ -254,28 +279,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         decision_engine,
         config.demo_mode,
     ));
-    info!("Primary order manager initialized");
 
-    // ── Primary execution workers ─────────────────────────────────────────
-    // Backwards-compatibility requirement: orders submitted via gRPC
-    // (BotService::submit_order) enqueue into the primary OrderManager's queue.
-    // These workers consume that queue so gRPC-originated orders are executed.
-    // Note: registry-based WalletWorkers have their OWN OrderManagers and
-    //       their OWN execution workers; there is no cross-queue sharing.
-    let primary_semaphore = Arc::new(tokio::sync::Semaphore::new(config.execution_workers));
-    for i in 0..config.execution_workers {
-        let manager = order_manager.clone();
-        let sem = primary_semaphore.clone();
-        tokio::spawn(async move {
-            info!("Primary execution worker {} started (gRPC path)", i);
-            manager.execution_worker(sem).await;
-        });
+    // Primary execution workers — consume the gRPC-path OrderManager queue.
+    // Kept as a minimal control-plane shim for backwards compat with BotService.
+    {
+        let sem = Arc::new(tokio::sync::Semaphore::new(config.execution_workers));
+        for i in 0..config.execution_workers {
+            let manager = order_manager.clone();
+            let sem = sem.clone();
+            tokio::spawn(async move {
+                info!("Primary execution worker {} started (gRPC control-plane shim)", i);
+                manager.execution_worker(sem).await;
+            });
+        }
     }
+    info!("Primary order manager + gRPC shim workers initialized");
 
     // ── WebSocket token monitor ───────────────────────────────────────────
-    // Single shared instance; broadcasts events to all registry workers via
-    // the PumpFunClient's internal broadcast channel.  No token consumer runs
-    // on the primary path — auto-snipe is handled exclusively by registry workers.
+    // Single shared instance; broadcasts events to all registry WalletWorkers.
+    // No token consumer on the primary path — auto-snipe is WalletWorker-only.
     {
         let ws_monitor = websocket::WebSocketMonitor::new(
             rpc_manager.clone(),
@@ -303,23 +325,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // ── Global auto_snipe / snipe_amount ─────────────────────────────────
+    let auto_snipe = std::env::var("AUTO_SNIPE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let snipe_amount = std::env::var("SNIPE_AMOUNT_SOL")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|sol| (sol * 1_000_000_000.0) as u64)
+        .unwrap_or(50_000_000);
+
     // ── Wallet Registry Bootstrap ─────────────────────────────────────────
-    // If the registry is empty, auto-register the primary wallet as wallet_001.
-    // KEYPAIR_PATH is used as the path for registry-worker spawn; if it is not
-    // set, wallet_001 is registered with null keypair_path and falls back to the
-    // primary execution path (gRPC workers above) for order execution.
+    // Invariant: every enabled registry entry MUST have a usable keypair_path so
+    // the orchestrator can spawn a WalletWorker for it.
+    //
+    // If the registry is empty, auto-register wallet_001 with the primary keypair.
+    // Key resolution order:
+    //   (1) KEYPAIR_PATH env var      — file already on disk, use directly
+    //   (2) WALLET_PRIVATE_KEY mode   — materialize bytes to /tmp (not demo)
+    //   (3) Demo mode                 — materialize ephemeral bytes to /tmp
+    //
+    // Materialized paths are volatile (lost on restart) but that is acceptable:
+    // the orchestrator re-materializes on every startup during bootstrap.
     let primary_pubkey = primary_pumpfun_client.pubkey().to_string();
     {
         let all_wallets = database::load_wallet_registry(&db_pool.pool).await;
         if all_wallets.is_empty() {
             info!("wallet_registry is empty — auto-registering primary wallet as 'wallet_001'");
-            let keypair_path = std::env::var("KEYPAIR_PATH").ok();
-            if keypair_path.is_none() {
-                info!(
-                    "KEYPAIR_PATH not set — wallet_001 registered without keypair_path; \
-                     gRPC execution workers handle order processing"
-                );
+
+            let keypair_path: Option<String> =
+                // (1) explicit file path already on disk
+                std::env::var("KEYPAIR_PATH").ok()
+                .or_else(|| {
+                    // (2/3) materialize bytes to temp file
+                    let label = if config.demo_mode {
+                        "wallet_001_demo"
+                    } else {
+                        "wallet_001_primary"
+                    };
+                    materialize_keypair_to_tmp(&config.keypair_bytes, label)
+                });
+
+            match keypair_path {
+                Some(ref path) => {
+                    info!(
+                        path = %path,
+                        "wallet_001 bootstrap: keypair_path resolved — will spawn WalletWorker"
+                    );
+                }
+                None => {
+                    warn!(
+                        "wallet_001 bootstrap: keypair could not be materialized; \
+                         gRPC execution workers will handle order processing"
+                    );
+                }
             }
+
             match database::upsert_wallet_registry(
                 &db_pool.pool,
                 "wallet_001",
@@ -343,16 +404,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    // ── Global auto_snipe / snipe_amount ─────────────────────────────────
-    let auto_snipe = std::env::var("AUTO_SNIPE")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-    let snipe_amount = std::env::var("SNIPE_AMOUNT_SOL")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .map(|sol| (sol * 1_000_000_000.0) as u64)
-        .unwrap_or(50_000_000);
 
     // ── WorkerFactory ─────────────────────────────────────────────────────
     let factory = Arc::new(WorkerFactory {
@@ -380,16 +431,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (spawn_tx, spawn_rx) = mpsc::channel::<WalletFullEntry>(128);
 
     // ── Supervisor task ───────────────────────────────────────────────────
-    // Owns JoinSet<String>, active_ids, runtime_failure_counts, and
-    // build_failure_counts directly (no Mutex shared with other tasks).
+    // Owns JoinSet<String>, active_ids, runtime_fail_counts, and
+    // build_fail_counts directly (no Mutex shared with other tasks).
     //
-    // build_failure_counts tracks consecutive failed keypair-load attempts for
-    // wallets that have a keypair_path configured.  After MAX_RESTART_ATTEMPTS
-    // consecutive build failures, the wallet is halted to prevent infinite
-    // noisy retries.
-    //
-    // runtime_failure_counts tracks how many times a spawned worker exited
-    // unexpectedly.  Same MAX_RESTART_ATTEMPTS limit + true exponential backoff.
+    // Failure tracking:
+    //   build_fail_counts  — consecutive build() failures for wallets with a
+    //                        configured keypair_path (or missing path → also fails).
+    //                        After MAX_RESTART_ATTEMPTS: HALT + permanently_skipped.
+    //   runtime_fail_counts — consecutive unexpected WalletWorker exits.
+    //                         Same MAX_RESTART_ATTEMPTS limit + exponential backoff.
     {
         let factory_sup = factory.clone();
         let db_pool_sup = db_pool.clone();
@@ -434,8 +484,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 info!(wallet_id = %wallet_id, "Supervisor: spawning WalletWorker");
                                 active_ids.insert(wallet_id.clone());
 
-                                // Catch panics via AssertUnwindSafe + catch_unwind so that
-                                // wallet_id is always returned to join_next(), even on panic.
+                                // Wrap in catch_unwind so wallet_id is always returned to
+                                // join_next(), even on panic.
                                 let wid = wallet_id.clone();
                                 js.spawn(async move {
                                     use futures::FutureExt;
@@ -452,13 +502,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
 
-                            BuildOutcome::NoPath => {
-                                // No keypair_path — normal for wallets handled by primary path.
-                                // Don't count as a failure; just skip silently.
-                            }
-
                             BuildOutcome::Failed(reason) => {
-                                // keypair_path configured but unreadable/invalid.
+                                // keypair_path missing or unreadable/invalid.
+                                // Every enabled wallet MUST have usable key material;
+                                // treat as a hard configuration error and halt after
+                                // MAX_RESTART_ATTEMPTS consecutive failures.
                                 let count =
                                     build_fails.entry(wallet_id.clone()).or_insert(0);
                                 *count += 1;
@@ -510,7 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 wallet_id = %wallet_id,
                                 attempts,
                                 decision = "HALT",
-                                "Supervisor: WalletWorker exceeded MAX_RESTART_ATTEMPTS — halting wallet"
+                                "Supervisor: WalletWorker exceeded MAX_RESTART_ATTEMPTS — halting"
                             );
                             permanently_skipped.insert(wallet_id.clone());
                             database::halt_wallet(&db_pool_sup.pool, &wallet_id).await;
@@ -573,8 +621,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Watcher task: polls for newly-enabled wallets every 30s ──────────
     // Supervisor deduplicates (via active_ids / permanently_skipped).
-    // Restarts with backoff are handled by supervisor's one-shot timers,
-    // NOT by this watcher — the watcher only discovers genuinely new wallets.
+    // Restarts with backoff are handled by supervisor's one-shot timers.
     {
         let db_pool_watch = db_pool.clone();
         let tx_watch = spawn_tx.clone();
