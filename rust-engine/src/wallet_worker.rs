@@ -52,6 +52,8 @@ pub struct WalletWorkerConfig {
     pub auto_snipe: bool,
     /// Snipe order size in lamports.
     pub snipe_amount_lamports: u64,
+    /// Number of consecutive REJECTs that trigger auto-pause (from system_config).
+    pub auto_pause_threshold: u32,
 }
 
 /// A self-contained worker that manages one wallet's full execution lifecycle.
@@ -163,9 +165,9 @@ impl WalletWorker {
             self.mev_protection_enabled,
         ));
 
-        // Per-wallet DecisionEngine — stateless, but isolated so future
-        // per-wallet rule extensions don't bleed across wallets.
-        let decision_engine = Arc::new(DecisionEngine::new());
+        // Per-wallet DecisionEngine — isolated state + auto-pause threshold
+        // from system_config (default 10 consecutive REJECTs).
+        let decision_engine = Arc::new(DecisionEngine::with_threshold(self.config.auto_pause_threshold));
 
         // Per-wallet OrderManagerConfig with risk limits from wallet_config.
         let order_config = OrderManagerConfig {

@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server,
-  Settings2, AlertTriangle, Save, Loader2, FlaskConical, ChevronDown, ChevronUp,
+  Settings2, AlertTriangle, Save, Loader2, FlaskConical, Shield,
+  Info,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 
 interface EnvVar {
   key: string;
@@ -59,6 +61,19 @@ function useSettingsConfig() {
       if (!res.ok) throw new Error("Failed to fetch config");
       return res.json() as Promise<ConfigMap>;
     },
+  });
+}
+
+function useActivePreset() {
+  return useQuery<{ preset: string }>({
+    queryKey: ["activePreset"],
+    queryFn: async () => {
+      const res = await fetch("/api/wallets/wallet_001/config");
+      if (!res.ok) return { preset: "balanced" };
+      const data = (await res.json()) as { strategyPreset?: string };
+      return { preset: data.strategyPreset ?? "balanced" };
+    },
+    staleTime: 10_000,
   });
 }
 
@@ -260,124 +275,131 @@ function ConnectionCard({ config }: { config: ConfigMap }) {
   );
 }
 
-// ── Trading Parameters Card ───────────────────────────────────────────────────
+// ── Strategy Preset Selector ──────────────────────────────────────────────────
 
-function TradingParametersCard({ config }: { config: ConfigMap }) {
+const PRESETS = [
+  {
+    id: "conservative",
+    label: "Conservative",
+    description: "Small trades, tight stop-loss. Lower risk, lower reward.",
+    detail: "0.05 SOL/trade · 5% stop · 20% target · max 2 positions",
+    color: "border-blue-500/40 bg-blue-500/5 text-blue-400",
+    activeColor: "border-blue-500 bg-blue-500/15 text-blue-300",
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Moderate sizing with sensible risk controls. Good starting point.",
+    detail: "0.15 SOL/trade · 10% stop · 50% target · max 5 positions",
+    color: "border-primary/30 bg-primary/5 text-primary/80",
+    activeColor: "border-primary bg-primary/15 text-primary",
+  },
+  {
+    id: "aggressive",
+    label: "Aggressive",
+    description: "Larger positions, wider stops. Higher risk, higher reward.",
+    detail: "0.5 SOL/trade · 20% stop · 100% target · max 10 positions",
+    color: "border-orange-500/30 bg-orange-500/5 text-orange-400/80",
+    activeColor: "border-orange-500 bg-orange-500/15 text-orange-300",
+  },
+] as const;
+
+type PresetId = (typeof PRESETS)[number]["id"];
+
+function StrategyPresetCard() {
   const { toast } = useToast();
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
+  const { data: presetData } = useActivePreset();
+  const [saving, setSaving] = useState(false);
+  const [pending, setPending] = useState<PresetId | null>(null);
 
-  const [maxPos, setMaxPos] = useState(config["MAX_POSITION_SIZE_SOL"] ?? "");
-  const [stopLoss, setStopLoss] = useState(config["STOP_LOSS_PERCENT"] ?? "");
-  const [takeProfit, setTakeProfit] = useState(config["TAKE_PROFIT_PERCENT"] ?? "");
-  const [isSaving, setIsSaving] = useState(false);
-  const [showRestart, setShowRestart] = useState(false);
+  const activePreset = (presetData?.preset ?? "balanced") as PresetId;
 
-  useEffect(() => {
-    setMaxPos(config["MAX_POSITION_SIZE_SOL"] ?? "");
-    setStopLoss(config["STOP_LOSS_PERCENT"] ?? "");
-    setTakeProfit(config["TAKE_PROFIT_PERCENT"] ?? "");
-  }, [config]);
-
-  async function handleSave() {
-    setIsSaving(true);
-    try {
-      const res = await fetch("/api/settings/config", {
+  const savePreset = useMutation({
+    mutationFn: async (preset: PresetId) => {
+      setSaving(true);
+      const res = await fetch("/api/strategy/preset", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          MAX_POSITION_SIZE_SOL: maxPos.trim(),
-          STOP_LOSS_PERCENT: stopLoss.trim(),
-          TAKE_PROFIT_PERCENT: takeProfit.trim(),
-        }),
+        body: JSON.stringify({ preset }),
       });
-      if (!res.ok) throw new Error("Save failed");
-      toast({ title: "Trading parameters saved" });
-      setShowRestart(true);
-      void queryClient.invalidateQueries({ queryKey: ["settingsConfig"] });
-    } catch {
-      toast({ title: "Failed to save parameters", variant: "destructive" });
-    } finally {
-      setIsSaving(false);
-    }
+      if (!res.ok) {
+        const err = (await res.json()) as { detail?: string };
+        throw new Error(err.detail ?? "Failed to save preset");
+      }
+      return res.json();
+    },
+    onSuccess: (_data, preset) => {
+      toast({ title: `Strategy preset set to ${preset}` });
+      void qc.invalidateQueries({ queryKey: ["activePreset"] });
+      setPending(null);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to save preset", description: err.message, variant: "destructive" });
+      setPending(null);
+    },
+    onSettled: () => setSaving(false),
+  });
+
+  function handleSelect(preset: PresetId) {
+    if (preset === activePreset) return;
+    setPending(preset);
+    savePreset.mutate(preset);
   }
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-base flex items-center gap-2">
-          <Settings2 className="w-4 h-4 text-primary" />
-          Trading Parameters
+          <Shield className="w-4 h-4 text-primary" />
+          Strategy Preset
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        {showRestart && <RestartNotice />}
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="max-pos" className="text-xs">
-              Max Position Size (SOL)
-            </Label>
-            <Input
-              id="max-pos"
-              type="number"
-              step="0.1"
-              min="0"
-              value={maxPos}
-              onChange={(e) => setMaxPos(e.target.value)}
-              placeholder="10"
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">Max SOL per trade</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="stop-loss" className="text-xs">
-              Stop-Loss (%)
-            </Label>
-            <Input
-              id="stop-loss"
-              type="number"
-              step="1"
-              min="0"
-              max="100"
-              value={stopLoss}
-              onChange={(e) => setStopLoss(e.target.value)}
-              placeholder="10"
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">Exit at −X%</p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="take-profit" className="text-xs">
-              Take-Profit (%)
-            </Label>
-            <Input
-              id="take-profit"
-              type="number"
-              step="1"
-              min="0"
-              value={takeProfit}
-              onChange={(e) => setTakeProfit(e.target.value)}
-              placeholder="50"
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">Exit at +X%</p>
-          </div>
-        </div>
-
-        <p className="text-xs text-muted-foreground/70">
-          Note: Stop-Loss and Take-Profit are persisted and reserved for the Python strategy engine. Max Position Size is applied to the Rust execution engine on next restart.
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">
+          Choose a risk profile for your trading strategies. The preset controls position size,
+          stop-loss, take-profit, and max concurrent positions.
         </p>
 
-        <Button onClick={handleSave} disabled={isSaving} size="sm">
-          {isSaving ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
-          ) : (
-            <Save className="w-3.5 h-3.5 mr-1.5" />
-          )}
-          Save parameters
-        </Button>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {PRESETS.map((p) => {
+            const isActive = p.id === activePreset;
+            const isSavingThis = pending === p.id && saving;
+            return (
+              <button
+                key={p.id}
+                onClick={() => handleSelect(p.id)}
+                disabled={saving}
+                className={cn(
+                  "relative rounded-lg border-2 px-3 py-3 text-left transition-all hover:opacity-90 disabled:opacity-60",
+                  isActive ? p.activeColor : p.color
+                )}
+              >
+                {isActive && (
+                  <span className="absolute top-2 right-2">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                  </span>
+                )}
+                {isSavingThis && (
+                  <span className="absolute top-2 right-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  </span>
+                )}
+                <div className="font-semibold text-sm mb-1">{p.label}</div>
+                <div className="text-xs opacity-80 leading-relaxed mb-2">{p.description}</div>
+                <div className="text-[10px] font-mono opacity-60">{p.detail}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-start gap-2 rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span>
+            The preset is applied by the Python strategy engine. Changes take effect on the next
+            strategy evaluation cycle — no engine restart required.
+          </span>
+        </div>
       </CardContent>
     </Card>
   );
@@ -469,7 +491,7 @@ function ServiceUrlsCard({ config }: { config: ConfigMap }) {
   );
 }
 
-// ── Wallet Setup Guide ────────────────────────────────────────────────────────
+// ── Safe Wallet Setup Guide ───────────────────────────────────────────────────
 
 function Code({ children }: { children: React.ReactNode }) {
   return (
@@ -480,113 +502,68 @@ function Code({ children }: { children: React.ReactNode }) {
 }
 
 function WalletSetupGuide() {
-  const [open, setOpen] = useState(false);
-
   return (
-    <div className="mt-3 rounded-lg border border-dashed border-border/60">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <span className="font-medium">Show setup guide</span>
-        {open ? (
-          <ChevronUp className="w-3.5 h-3.5 flex-shrink-0" />
-        ) : (
-          <ChevronDown className="w-3.5 h-3.5 flex-shrink-0" />
-        )}
-      </button>
+    <div className="mt-3 rounded-lg border border-dashed border-border/60 px-4 py-4 space-y-4 text-xs text-foreground/80">
+      <p className="font-semibold text-sm text-foreground/90 flex items-center gap-2">
+        <Shield className="w-4 h-4 text-primary" />
+        How to set up your wallet (safe method)
+      </p>
 
-      <div
-        className={`overflow-hidden transition-all duration-300 ease-in-out ${
-          open ? "max-h-[600px] opacity-100" : "max-h-0 opacity-0"
-        }`}
-      >
-        <div className="px-3 pb-4 space-y-4 text-xs text-foreground/80">
-          <div className="h-px bg-border/40" />
-          <p className="font-semibold text-sm text-foreground/90">How to set up your wallet</p>
+      <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 text-yellow-400 text-xs">
+        <strong>Never paste your private key or key bytes into any web interface.</strong>{" "}
+        Use the file-path method below to keep your key material server-side only.
+      </div>
 
-          {/* Step 1 */}
-          <div className="space-y-1.5">
-            <div className="flex items-start gap-2">
-              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
-                1
-              </span>
-              <p className="font-semibold text-foreground/90">Generate a Solana keypair</p>
-            </div>
-            <p className="ml-7 text-muted-foreground">
-              If you have the Solana CLI installed, run:
-            </p>
-            <div className="ml-7 rounded bg-muted/50 px-3 py-2 font-mono text-[11px] text-foreground/80">
-              solana-keygen new --outfile ~/my-wallet.json
-            </div>
-            <p className="ml-7 text-muted-foreground">
-              Or generate one online at{" "}
-              <span className="text-primary">keypair.solana.com</span> and save the JSON file.
-            </p>
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">1</span>
+            <p className="font-semibold text-foreground/90">Generate a keypair file on the server</p>
           </div>
-
-          {/* Step 2 */}
-          <div className="space-y-1.5">
-            <div className="flex items-start gap-2">
-              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
-                2
-              </span>
-              <p className="font-semibold text-foreground/90">Get the private key bytes</p>
-            </div>
-            <p className="ml-7 text-muted-foreground">
-              The keypair file contains a JSON array of 64 numbers — this is what you need.
-              View it with:
-            </p>
-            <div className="ml-7 rounded bg-muted/50 px-3 py-2 font-mono text-[11px] text-foreground/80">
-              cat ~/my-wallet.json
-            </div>
-            <div className="ml-7 rounded bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 text-yellow-400 space-y-1">
-              <p className="font-semibold">Important:</p>
-              <p>
-                The output of <Code>solana-keygen pubkey</Code> is the <em>public key only</em> —
-                not usable here. You need the full 64-byte JSON array from the keypair file.
-              </p>
-            </div>
-            <p className="ml-7 text-muted-foreground">
-              Alternatively, paste your base58-encoded private key (64 bytes = 88 base58 chars).
-            </p>
+          <div className="ml-7 rounded bg-muted/50 px-3 py-2 font-mono text-[11px] text-foreground/80">
+            solana-keygen new --outfile /secrets/wallet.json --no-bip39-passphrase
           </div>
+          <p className="ml-7 text-muted-foreground">
+            Run this on the machine where the trading engine runs, not on your local computer.
+          </p>
+        </div>
 
-          {/* Step 3 */}
-          <div className="space-y-1.5">
-            <div className="flex items-start gap-2">
-              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
-                3
-              </span>
-              <p className="font-semibold text-foreground/90">Add it to Replit Secrets</p>
-            </div>
-            <ol className="ml-7 text-muted-foreground space-y-1 list-decimal list-inside">
-              <li>Click the <strong className="text-foreground/80">padlock icon</strong> in the Replit left sidebar (Secrets)</li>
-              <li>Click <strong className="text-foreground/80">New secret</strong></li>
-              <li>
-                Set the key to <Code>WALLET_PRIVATE_KEY</Code>
-              </li>
-              <li>
-                Paste the JSON array (e.g. <Code>[12,34,56,…]</Code>) as the value
-              </li>
-              <li>Click <strong className="text-foreground/80">Add secret</strong></li>
-            </ol>
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">2</span>
+            <p className="font-semibold text-foreground/90">Set the path as a Replit Secret</p>
           </div>
+          <ol className="ml-7 text-muted-foreground space-y-1 list-decimal list-inside">
+            <li>Open the <strong className="text-foreground/80">Secrets</strong> panel (padlock icon in the sidebar)</li>
+            <li>Add a secret with key <Code>KEYPAIR_PATH</Code></li>
+            <li>Set the value to the <em>file path</em>, e.g. <Code>/secrets/wallet.json</Code></li>
+          </ol>
+          <p className="ml-7 text-muted-foreground">
+            The trading engine reads the file at startup. The key never leaves the server.
+          </p>
+        </div>
 
-          {/* Step 4 */}
-          <div className="space-y-1.5">
-            <div className="flex items-start gap-2">
-              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
-                4
-              </span>
-              <p className="font-semibold text-foreground/90">Restart the Trading Engine</p>
-            </div>
-            <p className="ml-7 text-muted-foreground">
-              Click the <strong className="text-foreground/80">Restart</strong> button next to the{" "}
-              <Code>rust-engine: Trading Engine</Code> workflow in the Replit toolbar.
-              The wallet badge above will turn green and the Dashboard "Rust Engine" indicator will go live.
-            </p>
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">3</span>
+            <p className="font-semibold text-foreground/90">Alternative: register via the Wallets page</p>
           </div>
+          <p className="ml-7 text-muted-foreground">
+            Your operator can also register wallets via <Code>POST /api/wallets</Code> with the
+            admin API key. The path is stored server-side and never returned to the UI.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">4</span>
+            <p className="font-semibold text-foreground/90">Restart the Trading Engine</p>
+          </div>
+          <p className="ml-7 text-muted-foreground">
+            Click <strong className="text-foreground/80">Restart</strong> next to{" "}
+            <Code>rust-engine: Trading Engine</Code> in the Replit toolbar.
+            The wallet badge above will turn green.
+          </p>
         </div>
       </div>
     </div>
@@ -617,7 +594,8 @@ export default function SettingsPage() {
           )}
         </div>
         <p className="text-sm text-muted-foreground">
-          Wallet keys must be set in Replit Secrets. All other settings are editable here.
+          Connection and service configuration. Wallet keys are managed server-side via{" "}
+          <code className="text-xs font-mono">KEYPAIR_PATH</code>.
         </p>
       </div>
 
@@ -672,15 +650,14 @@ export default function SettingsPage() {
               </div>
             ) : status.wallet.configured ? (
               <div className="rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                Public key is available when the Rust engine starts, or when{" "}
-                <span className="font-mono">WALLET_PRIVATE_KEY</span> is set as a JSON byte array.
+                Public key is available once the Rust engine starts with the configured keypair path.
               </div>
             ) : (
               <>
                 <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON array)
-                  in the <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
-                  <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
+                  No execution wallet registered. Ask your operator to add a wallet via the
+                  admin CLI or register one via the{" "}
+                  <strong>Wallets page</strong>.
                 </div>
                 <WalletSetupGuide />
               </>
@@ -689,52 +666,43 @@ export default function SettingsPage() {
         </Card>
       )}
 
+      {/* Strategy Preset — always shown */}
+      <StrategyPresetCard />
+
       {/* Editable sections — populated once config loads */}
       {config && !configLoading && (
         <>
           <ConnectionCard config={config} />
-          <TradingParametersCard config={config} />
           <ServiceUrlsCard config={config} />
         </>
       )}
 
-      {configLoading && (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground animate-pulse">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          Loading saved config…
-        </div>
-      )}
-
-      {/* DATABASE_URL — read-only status */}
-      {status && (
+      {/* RPC status */}
+      {status?.rpc && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
-              <Server className="w-4 h-4 text-primary" />
-              Infrastructure
-              <Badge variant="secondary" className="text-xs ml-auto font-normal">Read-only</Badge>
+              {status.rpc.online ? (
+                <Wifi className="w-4 h-4 text-green-500" />
+              ) : (
+                <WifiOff className="w-4 h-4 text-red-500" />
+              )}
+              RPC Status
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            {status.envVars
-              .filter((v) => ["DATABASE_URL", "GRPC_PORT", "METRICS_PORT"].includes(v.key))
-              .map((v) => (
-                <div key={v.key} className="flex items-center gap-2 py-2 border-b border-border last:border-0">
-                  <StatusIcon ok={v.set} />
-                  <span className="font-mono text-xs text-foreground flex-1 min-w-0 truncate">{v.key}</span>
-                  <span className="text-xs text-muted-foreground truncate max-w-[100px] sm:max-w-[200px]">
-                    {v.set ? v.masked || "****" : <span className="italic opacity-40">not set</span>}
-                  </span>
-                  {v.set && (
-                    <Badge variant="secondary" className="text-xs">
-                      {v.source === "db" ? "saved" : "env"}
-                    </Badge>
-                  )}
-                </div>
-              ))}
-            <p className="text-xs text-muted-foreground mt-3">
-              DATABASE_URL is auto-injected by the Replit database attachment. Private keys are never exposed here.
-            </p>
+          <CardContent className="space-y-2">
+            <div className="flex items-center gap-3">
+              <StatusIcon ok={status.rpc.online} />
+              <span className="text-sm text-foreground">
+                {status.rpc.online ? "Connected" : "Offline / Unreachable"}
+              </span>
+              {status.rpc.configured && <LatencyBadge ms={status.rpc.latencyMs ?? null} />}
+            </div>
+            {status.rpc.url && (
+              <div className="font-mono text-xs text-muted-foreground truncate">
+                {status.rpc.url}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

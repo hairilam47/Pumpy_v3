@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import structlog
+import os
+import aiohttp
 
 from config import settings
 
@@ -167,3 +169,85 @@ async def update_strategy_config(body: StrategyConfigUpdate, engine=Depends(get_
                 strategy.buy_amount_sol = body.buy_amount_sol
             return {"success": True, "strategy": strategy.get_stats()}
     raise HTTPException(status_code=404, detail=f"Strategy '{body.strategy_name}' not found")
+
+
+PRESETS = {
+    "conservative": {
+        "risk_per_trade_sol": 0.05,
+        "stop_loss_pct": 5,
+        "take_profit_pct": 20,
+        "max_positions": 2,
+    },
+    "balanced": {
+        "risk_per_trade_sol": 0.15,
+        "stop_loss_pct": 10,
+        "take_profit_pct": 50,
+        "max_positions": 5,
+    },
+    "aggressive": {
+        "risk_per_trade_sol": 0.5,
+        "stop_loss_pct": 20,
+        "take_profit_pct": 100,
+        "max_positions": 10,
+    },
+}
+
+
+class PresetUpdate(BaseModel):
+    preset: str
+    wallet_id: str = "wallet_001"
+
+
+@router.put("/strategy/preset")
+async def set_strategy_preset(body: PresetUpdate, engine=Depends(get_engine)):
+    """
+    Set the strategy risk preset for a wallet.
+    Writes the preset to wallet_config via the Express API and applies
+    preset parameters to all active strategies immediately.
+    Allowed values: conservative | balanced | aggressive.
+    """
+    if body.preset not in PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preset must be one of: {', '.join(PRESETS.keys())}",
+        )
+
+    params = PRESETS[body.preset]
+
+    api_base = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
+    admin_key = os.environ.get("ADMIN_API_KEY", "")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                f"{api_base}/api/wallets/{body.wallet_id}/config",
+                json={"strategy_preset": body.preset},
+                headers={"X-Admin-Key": admin_key, "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status not in (200, 404):
+                    text = await resp.text()
+                    logger.warning("Failed to persist preset to wallet_config", status=resp.status, body=text)
+    except Exception as exc:
+        logger.warning("Could not persist preset to Express API", error=str(exc))
+
+    for strategy in engine.strategies:
+        if hasattr(strategy, "buy_amount_sol"):
+            strategy.buy_amount_sol = params["risk_per_trade_sol"]
+        if hasattr(strategy, "stop_loss_pct"):
+            strategy.stop_loss_pct = float(params["stop_loss_pct"])
+        if hasattr(strategy, "take_profit_pct"):
+            strategy.take_profit_pct = float(params["take_profit_pct"])
+
+    logger.info("Strategy preset applied", preset=body.preset, wallet_id=body.wallet_id, params=params)
+    return {
+        "success": True,
+        "preset": body.preset,
+        "wallet_id": body.wallet_id,
+        "params": params,
+    }
+
+
+@router.get("/strategy/preset")
+async def get_preset_definitions():
+    """Return the preset definitions (read-only reference)."""
+    return PRESETS

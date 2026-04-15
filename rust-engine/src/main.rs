@@ -54,6 +54,7 @@ struct WorkerFactory {
     token_discovery_client: Arc<PumpFunClient>,
     auto_snipe: bool,
     snipe_amount_lamports: u64,
+    auto_pause_threshold: u32,
 }
 
 impl WorkerFactory {
@@ -98,6 +99,7 @@ impl WorkerFactory {
                 execution_workers: self.execution_workers,
                 auto_snipe: self.auto_snipe,
                 snipe_amount_lamports: self.snipe_amount_lamports,
+                auto_pause_threshold: self.auto_pause_threshold,
             },
             self.db_pool.clone(),
             self.rpc_manager.clone(),
@@ -173,6 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { m.start_server(port).await; });
     }
 
+    let mut auto_pause_threshold: u32 = 10;
+
     let db_pool = match DatabasePool::new(&config.database_url).await {
         Ok(pool) => {
             if let Err(e) = database::run_migrations(&pool).await {
@@ -182,6 +186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !db_overrides.is_empty() {
                 info!("Applying {} runtime override(s) from bot_config", db_overrides.len());
                 config.apply_db_overrides(&db_overrides);
+            }
+            if let Some(v) = db_overrides.get("auto_pause_threshold").or_else(|| db_overrides.get("AUTO_PAUSE_THRESHOLD")) {
+                if let Ok(n) = v.parse::<u32>() {
+                    auto_pause_threshold = n;
+                    info!("auto_pause_threshold set to {} from system_config", n);
+                }
             }
             info!("Database connected");
             pool
@@ -353,6 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         token_discovery_client: primary_pumpfun_client.clone(),
         auto_snipe,
         snipe_amount_lamports: snipe_amount,
+        auto_pause_threshold,
     });
 
     // Two spawn channels to enforce backoff policy:

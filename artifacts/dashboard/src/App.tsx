@@ -8,10 +8,11 @@ import StrategiesPage from "@/pages/Strategies";
 import TokensPage from "@/pages/Tokens";
 import TradesPage from "@/pages/Trades";
 import SettingsPage from "@/pages/Settings";
+import WalletsPage from "@/pages/Wallets";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, Bot, Coins, History, Settings2,
-  Activity, Github, ExternalLink
+  Activity, Github, ExternalLink, Wallet,
 } from "lucide-react";
 import { getGetBotStatusQueryOptions } from "@workspace/api-client-react";
 
@@ -27,6 +28,7 @@ const queryClient = new QueryClient({
 const NAV_LINKS = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/strategies", label: "Strategies", icon: Bot },
+  { href: "/wallets", label: "Wallets", icon: Wallet },
   { href: "/tokens", label: "Tokens", icon: Coins },
   { href: "/trades", label: "Trades", icon: History },
   { href: "/settings", label: "Settings", icon: Settings2 },
@@ -170,6 +172,7 @@ function Router() {
       <Switch>
         <Route path="/" component={DashboardPage} />
         <Route path="/strategies" component={StrategiesPage} />
+        <Route path="/wallets" component={WalletsPage} />
         <Route path="/tokens" component={TokensPage} />
         <Route path="/trades" component={TradesPage} />
         <Route path="/settings" component={SettingsPage} />

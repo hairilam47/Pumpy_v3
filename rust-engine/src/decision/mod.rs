@@ -1,4 +1,5 @@
-use tracing::{warn, error};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use tracing::{info, warn, error};
 
 use crate::order::Order;
 
@@ -53,25 +54,72 @@ pub struct DecisionContext<'a> {
 
 /// The single Decision Engine — the only authority that can approve or deny a trade.
 /// No code may submit an on-chain transaction without first receiving `Allow`.
-pub struct DecisionEngine;
+///
+/// Thread-safe state:
+/// - `consecutive_rejects`: counts unbroken REJECT streak per wallet instance.
+///   Reset to 0 on any ALLOW.
+/// - `auto_paused`: latched true once `auto_pause_threshold` consecutive REJECTs
+///   are observed. Once latched, all subsequent evaluate() calls return Halt.
+/// - `needs_db_pause`: single-fire flag that the OrderManager reads after each
+///   evaluate() to kick off an async DB status update to `paused`.
+pub struct DecisionEngine {
+    consecutive_rejects: AtomicU32,
+    auto_paused: AtomicBool,
+    /// Single-fire: set true when auto_pause is first triggered.
+    /// `take_needs_db_pause()` clears it and returns the old value.
+    needs_db_pause: AtomicBool,
+    auto_pause_threshold: u32,
+}
 
 impl DecisionEngine {
     pub fn new() -> Self {
-        Self
+        Self::with_threshold(10)
+    }
+
+    pub fn with_threshold(auto_pause_threshold: u32) -> Self {
+        Self {
+            consecutive_rejects: AtomicU32::new(0),
+            auto_paused: AtomicBool::new(false),
+            needs_db_pause: AtomicBool::new(false),
+            auto_pause_threshold,
+        }
+    }
+
+    /// Returns true (and resets the flag) if this engine just crossed the
+    /// auto-pause threshold for the first time. The caller should
+    /// async-update the database wallet status to 'paused'.
+    pub fn take_needs_db_pause(&self) -> bool {
+        self.needs_db_pause.swap(false, Ordering::AcqRel)
+    }
+
+    /// Returns true if this engine is in auto-paused state.
+    pub fn is_auto_paused(&self) -> bool {
+        self.auto_paused.load(Ordering::Acquire)
     }
 
     /// Evaluate a trade request and return the authoritative Decision.
     ///
     /// Rules applied in priority order:
+    ///   0. Auto-pause guard (Halt — if N consecutive REJECTs exceeded)
     ///   1. Demo mode guard (Halt)
     ///   2. Basic parameter validation (Reject)
     ///   3. Position-size risk check (Reject)
     ///   4. Portfolio exposure limit (Reject)
     ///   5. Daily loss limit (Reject)
     ///   6. MEV / sandwich risk check (Reject)
-    ///   7. Allow
+    ///   7. Allow (resets consecutive_rejects)
     pub fn evaluate(&self, ctx: &DecisionContext<'_>) -> Decision {
         let order = ctx.order;
+
+        if self.auto_paused.load(Ordering::Acquire) {
+            return self.emit(ctx, Decision::Halt {
+                reason: format!(
+                    "wallet auto-paused after {} consecutive rejections; \
+                     resume via the Wallets page or admin API",
+                    self.auto_pause_threshold
+                ),
+            });
+        }
 
         if ctx.demo_mode {
             return self.emit(ctx, Decision::Halt {
@@ -82,13 +130,13 @@ impl DecisionEngine {
         }
 
         if order.amount == 0 {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: "amount must be greater than zero".to_string(),
             });
         }
 
         if order.slippage_bps > ctx.max_slippage_bps {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: format!(
                     "slippage_bps={} exceeds allowed maximum of {}",
                     order.slippage_bps, ctx.max_slippage_bps
@@ -98,7 +146,7 @@ impl DecisionEngine {
 
         let trade_sol = order.amount as f64 / 1_000_000_000.0;
         if trade_sol > ctx.max_position_size_sol {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: format!(
                     "trade size {:.4} SOL exceeds max position size {:.4} SOL",
                     trade_sol, ctx.max_position_size_sol
@@ -108,7 +156,7 @@ impl DecisionEngine {
 
         let projected_exposure = ctx.current_portfolio_exposure_sol + trade_sol;
         if projected_exposure > ctx.max_portfolio_exposure_sol {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: format!(
                     "projected portfolio exposure {:.4} SOL would exceed limit {:.4} SOL",
                     projected_exposure, ctx.max_portfolio_exposure_sol
@@ -117,7 +165,7 @@ impl DecisionEngine {
         }
 
         if ctx.current_daily_loss_sol > ctx.max_daily_loss_sol {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: format!(
                     "daily loss {:.4} SOL has exceeded limit {:.4} SOL",
                     ctx.current_daily_loss_sol, ctx.max_daily_loss_sol
@@ -126,7 +174,7 @@ impl DecisionEngine {
         }
 
         if ctx.sandwich_risk_score > ctx.max_sandwich_risk_score {
-            return self.emit(ctx, Decision::Reject {
+            return self.on_reject(ctx, Decision::Reject {
                 reason: format!(
                     "sandwich risk score={} exceeds max={}",
                     ctx.sandwich_risk_score, ctx.max_sandwich_risk_score
@@ -134,7 +182,46 @@ impl DecisionEngine {
             });
         }
 
+        self.consecutive_rejects.store(0, Ordering::Release);
         self.emit(ctx, Decision::Allow)
+    }
+
+    /// Called for every REJECT decision. Updates the consecutive reject counter
+    /// and triggers auto-pause if the threshold is crossed.
+    fn on_reject(&self, ctx: &DecisionContext<'_>, decision: Decision) -> Decision {
+        let prev = self.consecutive_rejects.fetch_add(1, Ordering::AcqRel);
+        let count = prev + 1;
+
+        if count >= self.auto_pause_threshold {
+            let was_paused = self.auto_paused.swap(true, Ordering::AcqRel);
+            if !was_paused {
+                self.needs_db_pause.store(true, Ordering::Release);
+                error!(
+                    decision = "HALT",
+                    wallet_id = ctx.wallet_id,
+                    consecutive_rejects = count,
+                    threshold = self.auto_pause_threshold,
+                    "DecisionEngine: AUTO_PAUSE — wallet paused after consecutive rejections"
+                );
+                return self.emit(ctx, Decision::Halt {
+                    reason: format!(
+                        "wallet auto-paused after {} consecutive rejections; \
+                         resume via the Wallets page or admin API",
+                        self.auto_pause_threshold
+                    ),
+                });
+            }
+        } else {
+            info!(
+                decision = "REJECT",
+                wallet_id = ctx.wallet_id,
+                consecutive_rejects = count,
+                threshold = self.auto_pause_threshold,
+                "DecisionEngine: consecutive reject count"
+            );
+        }
+
+        self.emit(ctx, decision)
     }
 
     fn emit(&self, ctx: &DecisionContext<'_>, decision: Decision) -> Decision {
@@ -143,7 +230,7 @@ impl DecisionEngine {
 
         match &decision {
             Decision::Allow => {
-                warn!(
+                info!(
                     decision = label,
                     wallet_id = ctx.wallet_id,
                     order_id = ctx.order.id,

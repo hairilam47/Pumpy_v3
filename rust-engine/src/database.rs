@@ -154,6 +154,34 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
     .execute(&db.pool)
     .await?;
 
+    // Wallet alert escalation table — tracks per-wallet auto-pause events
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS wallet_alerts (
+            wallet_id       TEXT        NOT NULL,
+            error_type      TEXT        NOT NULL,
+            count           INTEGER     NOT NULL DEFAULT 1,
+            last_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            auto_paused_at  TIMESTAMPTZ,
+            PRIMARY KEY (wallet_id, error_type)
+        )
+        "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
+    // Ensure auto_pause_threshold exists in system_config with default value 10.
+    sqlx::query(
+        r#"
+        INSERT INTO system_config (key, value, description)
+        VALUES ('auto_pause_threshold', '10',
+                'Number of consecutive REJECTs before a wallet is auto-paused')
+        ON CONFLICT (key) DO NOTHING
+        "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
     info!("Database migrations complete");
     Ok(())
 }
@@ -290,6 +318,50 @@ pub async fn load_enabled_wallet_full_entries(pool: &DbPool) -> Vec<WalletFullEn
 /// Mark a wallet as halted in both wallet_registry and wallet_config.
 /// Idempotent — safe to call if already halted.
 /// Errors are logged but not returned — this is used in failure-recovery paths.
+pub async fn pause_wallet(pool: &DbPool, wallet_id: &str, reason: &str) {
+    if let Err(e) = sqlx::query(
+        "UPDATE wallet_registry SET status = 'paused' WHERE wallet_id = $1"
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(wallet_id = %wallet_id, "Failed to pause wallet in wallet_registry: {}", e);
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE wallet_config SET status = 'paused', updated_at = NOW() WHERE wallet_id = $1"
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(wallet_id = %wallet_id, "Failed to pause wallet in wallet_config: {}", e);
+    }
+
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO wallet_alerts (wallet_id, error_type, count, last_at, auto_paused_at)
+        VALUES ($1, 'consecutive_reject', 1, NOW(), NOW())
+        ON CONFLICT (wallet_id, error_type)
+        DO UPDATE SET count = wallet_alerts.count + 1, last_at = NOW(), auto_paused_at = NOW()
+        "#
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(wallet_id = %wallet_id, "Failed to upsert wallet_alerts: {}", e);
+    }
+
+    tracing::error!(
+        wallet_id = %wallet_id,
+        reason = reason,
+        decision = "HALT",
+        "Wallet auto-paused and persisted to DB"
+    );
+}
+
 pub async fn halt_wallet(pool: &DbPool, wallet_id: &str) {
     if let Err(e) = sqlx::query(
         "UPDATE wallet_registry SET status = 'halted' WHERE wallet_id = $1"
