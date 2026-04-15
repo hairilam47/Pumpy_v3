@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{info, warn, error};
 
 use crate::database::{self, DatabasePool};
@@ -109,9 +110,10 @@ impl WalletWorker {
     /// Run the wallet worker.
     ///
     /// Builds all per-wallet components (PumpFunClient, DecisionEngine,
-    /// MevProtector, OrderManager), spawns sub-tasks, and then parks the
-    /// future until cancelled.  Returns the wallet_id when it exits so the
-    /// orchestrator can track failures.
+    /// MevProtector, OrderManager), spawns child sub-tasks into an internal
+    /// JoinSet, and waits for the JoinSet.  When any child exits (normally or
+    /// via panic), all remaining children are aborted and the wallet_id is
+    /// returned so the orchestrator can detect the failure and apply backoff.
     pub async fn run(self) -> String {
         let wallet_id = self.config.wallet_id.clone();
 
@@ -192,33 +194,41 @@ impl WalletWorker {
             false, // keypair was loaded — not demo mode
         ));
 
+        // ── Internal JoinSet: tracks all child sub-tasks ───────────────────
+        // If any child exits unexpectedly, the worker as a whole exits so the
+        // orchestrator can detect the failure and apply restart/backoff logic.
+        let mut child_js: JoinSet<&'static str> = JoinSet::new();
+
         // Spawn execution workers (process orders from the queue).
         let semaphore = Arc::new(Semaphore::new(self.config.execution_workers));
         for i in 0..self.config.execution_workers {
             let manager = order_manager.clone();
             let sem = semaphore.clone();
             let wid = wallet_id.clone();
-            tokio::spawn(async move {
+            child_js.spawn(async move {
                 info!(wallet_id = %wid, worker = i, "Execution worker started");
                 manager.execution_worker(sem).await;
+                warn!(wallet_id = %wid, worker = i, "Execution worker exited unexpectedly");
+                "execution_worker"
             });
         }
 
         // Spawn token event consumer.
-        // Subscribes to the shared token-discovery broadcast so all wallets
-        // receive every new-token event discovered by the WebSocket monitor.
+        // Subscribes to the shared token-discovery broadcast so this wallet
+        // receives every new-token event discovered by the WebSocket monitor.
         {
             let manager = order_manager.clone();
             let discovery_client = self.token_discovery_client.clone();
             let auto_snipe = self.config.auto_snipe;
             let snipe_amount = self.config.snipe_amount_lamports;
             let wid = wallet_id.clone();
-            tokio::spawn(async move {
+            child_js.spawn(async move {
                 info!(wallet_id = %wid, auto_snipe, "Token event consumer started");
                 manager
                     .start_token_event_consumer(discovery_client, auto_snipe, snipe_amount)
                     .await;
-                warn!(wallet_id = %wid, "Token event consumer exited");
+                warn!(wallet_id = %wid, "Token event consumer exited unexpectedly");
+                "token_event_consumer"
             });
         }
 
@@ -226,7 +236,7 @@ impl WalletWorker {
         {
             let manager = order_manager.clone();
             let wid = wallet_id.clone();
-            tokio::spawn(async move {
+            child_js.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     interval.tick().await;
@@ -242,12 +252,40 @@ impl WalletWorker {
             "WalletWorker: all sub-tasks spawned, worker is live"
         );
 
-        // Park until cancelled by the orchestrator (e.g., on shutdown).
-        std::future::pending::<()>().await;
+        // ── Supervise children — exit when any child exits or panics ───────
+        // This is what makes failure visible to the orchestrator: when any
+        // child exits (execution_worker returns, consumer drops, position loop
+        // exits, or any of these panic), we abort all siblings and return so
+        // that the orchestrator's JoinSet detects the exit and applies the
+        // backoff-restart / halt logic.
+        while let Some(result) = child_js.join_next().await {
+            match result {
+                Ok(task_name) => {
+                    error!(
+                        wallet_id = %wallet_id,
+                        task = task_name,
+                        "WalletWorker: critical child task exited — aborting worker"
+                    );
+                }
+                Err(e) if e.is_panic() => {
+                    error!(
+                        wallet_id = %wallet_id,
+                        "WalletWorker: child task panicked — aborting worker: {:?}", e
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        wallet_id = %wallet_id,
+                        "WalletWorker: child task join error — aborting worker: {:?}", e
+                    );
+                }
+            }
+            // Abort all remaining children immediately.
+            child_js.abort_all();
+            break;
+        }
 
-        // Unreachable in normal operation — only reached if the future is
-        // explicitly cancelled, at which point the wallet_id is returned so
-        // the orchestrator can log the exit.
+        warn!(wallet_id = %wallet_id, "WalletWorker exiting");
         wallet_id
     }
 }

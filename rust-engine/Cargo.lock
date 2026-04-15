@@ -3108,6 +3108,7 @@ dependencies = [
  "bs58",
  "chrono",
  "dotenvy",
+ "futures",
  "futures-util",
  "prometheus",
  "prost",
