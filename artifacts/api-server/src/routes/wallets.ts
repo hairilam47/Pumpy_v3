@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { db, walletRegistryTable, walletConfigTable } from "@workspace/db";
+import { requireAdminKey } from "../lib/admin-auth.js";
 
 const router = Router();
 
@@ -47,11 +48,11 @@ router.get("/wallets/:id/config", async (req, res) => {
   }
 });
 
-router.put("/wallets/:id/config", async (req, res) => {
+router.put("/wallets/:id/config", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   const body = req.body as Record<string, unknown>;
 
-  const update: Partial<{
+  const configUpdate: Partial<{
     riskPerTradeSol: number;
     dailyLossLimitSol: number;
     strategyPreset: string;
@@ -65,7 +66,7 @@ router.put("/wallets/:id/config", async (req, res) => {
       res.status(400).json({ error: "risk_per_trade_sol must be a positive number" });
       return;
     }
-    update.riskPerTradeSol = v;
+    configUpdate.riskPerTradeSol = v;
   }
 
   if (body.daily_loss_limit_sol !== undefined) {
@@ -74,7 +75,7 @@ router.put("/wallets/:id/config", async (req, res) => {
       res.status(400).json({ error: "daily_loss_limit_sol must be a positive number" });
       return;
     }
-    update.dailyLossLimitSol = v;
+    configUpdate.dailyLossLimitSol = v;
   }
 
   if (body.strategy_preset !== undefined) {
@@ -82,23 +83,40 @@ router.put("/wallets/:id/config", async (req, res) => {
       res.status(400).json({ error: "strategy_preset must be conservative, balanced, or aggressive" });
       return;
     }
-    update.strategyPreset = String(body.strategy_preset);
+    configUpdate.strategyPreset = String(body.strategy_preset);
   }
 
+  let newStatus: string | undefined;
   if (body.status !== undefined) {
     if (!VALID_STATUSES.has(String(body.status))) {
       res.status(400).json({ error: "status must be enabled, paused, or halted" });
       return;
     }
-    update.status = String(body.status);
+    newStatus = String(body.status);
+    configUpdate.status = newStatus;
   }
 
   try {
-    const rows = await db
-      .update(walletConfigTable)
-      .set(update)
-      .where(eq(walletConfigTable.walletId, id!))
-      .returning();
+    const rows = await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(walletConfigTable)
+        .set(configUpdate)
+        .where(eq(walletConfigTable.walletId, id!))
+        .returning();
+
+      if (updated.length === 0) {
+        return updated;
+      }
+
+      if (newStatus !== undefined) {
+        await tx
+          .update(walletRegistryTable)
+          .set({ status: newStatus })
+          .where(eq(walletRegistryTable.walletId, id!));
+      }
+
+      return updated;
+    });
 
     if (rows.length === 0) {
       res.status(404).json({ error: "Wallet config not found" });
@@ -111,24 +129,21 @@ router.put("/wallets/:id/config", async (req, res) => {
   }
 });
 
-router.post("/wallets/:id/pause", async (req, res) => {
+router.post("/wallets/:id/pause", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   try {
-    await db
-      .update(walletRegistryTable)
-      .set({ status: "paused" })
-      .where(eq(walletRegistryTable.walletId, id!));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(walletRegistryTable)
+        .set({ status: "paused" })
+        .where(eq(walletRegistryTable.walletId, id!));
 
-    const rows = await db
-      .update(walletConfigTable)
-      .set({ status: "paused", updatedAt: new Date() })
-      .where(eq(walletConfigTable.walletId, id!))
-      .returning();
+      await tx
+        .update(walletConfigTable)
+        .set({ status: "paused", updatedAt: new Date() })
+        .where(eq(walletConfigTable.walletId, id!));
+    });
 
-    if (rows.length === 0) {
-      res.status(404).json({ error: "Wallet not found" });
-      return;
-    }
     res.json({ ok: true, walletId: id, status: "paused" });
   } catch (err) {
     console.error(`POST /wallets/${id}/pause error:`, err);
@@ -136,24 +151,21 @@ router.post("/wallets/:id/pause", async (req, res) => {
   }
 });
 
-router.post("/wallets/:id/resume", async (req, res) => {
+router.post("/wallets/:id/resume", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   try {
-    await db
-      .update(walletRegistryTable)
-      .set({ status: "enabled" })
-      .where(eq(walletRegistryTable.walletId, id!));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(walletRegistryTable)
+        .set({ status: "enabled" })
+        .where(eq(walletRegistryTable.walletId, id!));
 
-    const rows = await db
-      .update(walletConfigTable)
-      .set({ status: "enabled", updatedAt: new Date() })
-      .where(eq(walletConfigTable.walletId, id!))
-      .returning();
+      await tx
+        .update(walletConfigTable)
+        .set({ status: "enabled", updatedAt: new Date() })
+        .where(eq(walletConfigTable.walletId, id!));
+    });
 
-    if (rows.length === 0) {
-      res.status(404).json({ error: "Wallet not found" });
-      return;
-    }
     res.json({ ok: true, walletId: id, status: "enabled" });
   } catch (err) {
     console.error(`POST /wallets/${id}/resume error:`, err);
@@ -161,7 +173,7 @@ router.post("/wallets/:id/resume", async (req, res) => {
   }
 });
 
-router.post("/wallets/:id/halt", async (req, res) => {
+router.post("/wallets/:id/halt", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   const { confirm } = req.body as { confirm?: boolean };
   if (!confirm) {
@@ -169,21 +181,18 @@ router.post("/wallets/:id/halt", async (req, res) => {
     return;
   }
   try {
-    await db
-      .update(walletRegistryTable)
-      .set({ status: "halted" })
-      .where(eq(walletRegistryTable.walletId, id!));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(walletRegistryTable)
+        .set({ status: "halted" })
+        .where(eq(walletRegistryTable.walletId, id!));
 
-    const rows = await db
-      .update(walletConfigTable)
-      .set({ status: "halted", updatedAt: new Date() })
-      .where(eq(walletConfigTable.walletId, id!))
-      .returning();
+      await tx
+        .update(walletConfigTable)
+        .set({ status: "halted", updatedAt: new Date() })
+        .where(eq(walletConfigTable.walletId, id!));
+    });
 
-    if (rows.length === 0) {
-      res.status(404).json({ error: "Wallet not found" });
-      return;
-    }
     res.json({ ok: true, walletId: id, status: "halted" });
   } catch (err) {
     console.error(`POST /wallets/${id}/halt error:`, err);
