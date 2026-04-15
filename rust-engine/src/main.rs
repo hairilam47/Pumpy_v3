@@ -43,6 +43,8 @@ struct WorkerFactory {
     rpc_manager: Arc<RpcManager>,
     metrics: Arc<Metrics>,
     jito_bundle_url: Option<String>,
+    /// Backup RPC used for pre-submission simulateTransaction (passed to each WalletWorker).
+    sim_rpc_url: Option<String>,
     mev_enabled: bool,
     order_timeout: Duration,
     max_retries: u32,
@@ -105,6 +107,7 @@ impl WorkerFactory {
             self.rpc_manager.clone(),
             self.metrics.clone(),
             self.jito_bundle_url.clone(),
+            self.sim_rpc_url.clone(),
             self.mev_enabled,
             self.order_timeout,
             self.max_retries,
@@ -225,10 +228,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("Primary PumpFun client: wallet={}", primary_pumpfun_client.pubkey());
 
+    // Derive simulation RPC URL: explicit env var takes precedence, then the
+    // second configured RPC endpoint (a backup/failover node).
+    let sim_rpc_url: Option<String> = std::env::var("JITO_SIM_RPC_URL").ok().or_else(|| {
+        config.rpc_endpoints.get(1).map(|e| e.url.clone())
+    });
+    if let Some(ref url) = sim_rpc_url {
+        info!("Jito pre-submission simulation RPC: {}", url);
+    } else {
+        info!("Jito pre-submission simulation: no backup RPC configured — simulation will be skipped");
+    }
+
     let jito_client_opt: Option<Arc<crate::mev::JitoClient>> = config
         .jito_bundle_url
         .as_ref()
-        .map(|url| Arc::new(crate::mev::JitoClient::new(url.clone())));
+        .map(|url| {
+            let mut client = crate::mev::JitoClient::new(url.clone());
+            if let Some(ref sim_url) = sim_rpc_url {
+                client = client.with_sim_rpc(sim_url.clone());
+            }
+            Arc::new(client)
+        });
 
     let mev_protector = Arc::new(MevProtector::new(
         config.jito_bundle_url.clone(),
@@ -372,6 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rpc_manager: rpc_manager.clone(),
         metrics: metrics.clone(),
         jito_bundle_url: config.jito_bundle_url.clone(),
+        sim_rpc_url: sim_rpc_url.clone(),
         mev_enabled: config.trading.mev_protection_enabled,
         order_timeout: Duration::from_secs(config.order_timeout_seconds),
         max_retries: config.trading.retry_attempts,

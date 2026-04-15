@@ -63,6 +63,8 @@ pub struct WalletWorker {
     rpc_manager: Arc<RpcManager>,
     metrics: Arc<Metrics>,
     jito_bundle_url: Option<String>,
+    /// Backup RPC endpoint used for pre-submission simulateTransaction calls.
+    sim_rpc_url: Option<String>,
     mev_protection_enabled: bool,
     order_timeout: Duration,
     max_retries: u32,
@@ -83,6 +85,7 @@ impl WalletWorker {
         rpc_manager: Arc<RpcManager>,
         metrics: Arc<Metrics>,
         jito_bundle_url: Option<String>,
+        sim_rpc_url: Option<String>,
         mev_protection_enabled: bool,
         order_timeout: Duration,
         max_retries: u32,
@@ -98,6 +101,7 @@ impl WalletWorker {
             rpc_manager,
             metrics,
             jito_bundle_url,
+            sim_rpc_url,
             mev_protection_enabled,
             order_timeout,
             max_retries,
@@ -150,11 +154,15 @@ impl WalletWorker {
             "WalletWorker: execution client ready"
         );
 
-        // Per-wallet JitoClient (uses the same global URL if configured).
-        let jito_client_opt: Option<Arc<JitoClient>> = self
-            .jito_bundle_url
-            .as_ref()
-            .map(|url| Arc::new(JitoClient::new(url.clone())));
+        // Per-wallet JitoClient: same bundle URL as global config, plus sim RPC for
+        // pre-submission simulation if one was provided by the orchestrator.
+        let jito_client_opt: Option<Arc<JitoClient>> = self.jito_bundle_url.as_ref().map(|url| {
+            let mut client = JitoClient::new(url.clone());
+            if let Some(ref sim_url) = self.sim_rpc_url {
+                client = client.with_sim_rpc(sim_url.clone());
+            }
+            Arc::new(client)
+        });
 
         // Per-wallet MevProtector.
         let mev_protector = Arc::new(MevProtector::new(

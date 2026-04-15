@@ -182,6 +182,27 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
     .execute(&db.pool)
     .await?;
 
+    // Seed Jito tip and simulation defaults into bot_config so operators can
+    // read/write them immediately via the dashboard without restarting the engine.
+    for (key, value, _description) in &[
+        ("JITO_TIP_PERCENT",         "0.001",     "Fraction of trade value used as Jito tip (e.g. 0.001 = 0.1%)"),
+        ("JITO_TIP_FLOOR_LAMPORTS",  "5000",      "Minimum Jito tip in lamports regardless of trade size"),
+        ("JITO_TIP_CEILING_LAMPORTS","10000000",  "Maximum Jito tip in lamports (10 SOL) regardless of trade size"),
+        ("JITO_SIMULATION_ENABLED",  "true",      "Run simulateTransaction on backup RPC before submitting Jito bundle"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO bot_config (key, value, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (key) DO NOTHING
+            "#,
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&db.pool)
+        .await?;
+    }
+
     info!("Database migrations complete");
     Ok(())
 }

@@ -596,9 +596,52 @@ impl OrderManager {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let max_cost = order.max_cost.unwrap_or(dynamic_max_cost);
         let min_output = order.min_output.unwrap_or(dynamic_min_output);
-        // Fixed tip: 0.001% of trade value, minimum 5,000 lamports
-        let trade_sol = order.amount as f64 / 1_000_000_000.0;
-        let tip_lamports = ((trade_sol * 0.001 * 1_000_000_000.0) as u64).max(5_000);
+
+        // Dynamic tip: read floor/ceiling/percent from bot_config at order time.
+        // Falls back to safe defaults when a key is absent or unparseable.
+        let tip_percent = database::get_config_value(&self.db_pool.pool, "JITO_TIP_PERCENT")
+            .await
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.001);
+        let tip_floor = database::get_config_value(&self.db_pool.pool, "JITO_TIP_FLOOR_LAMPORTS")
+            .await
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5_000);
+        let tip_ceiling = database::get_config_value(&self.db_pool.pool, "JITO_TIP_CEILING_LAMPORTS")
+            .await
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10_000_000);
+        let tip_lamports = JitoClient::compute_dynamic_tip(order.amount, tip_percent, tip_floor, tip_ceiling);
+
+        // Pre-submission simulation: reject orders likely to fail on-chain before they
+        // consume a Jito bundle slot. Simulation failure is not transient so we do not
+        // retry — run it once before the submission retry loop.
+        let sim_enabled = database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED")
+            .await
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
+        if sim_enabled {
+            // Build a transaction for simulation; replaceRecentBlockhash=true means
+            // blockhash staleness is handled by the sim RPC.
+            let (sim_tx, _) = match order.side {
+                OrderSide::Buy => {
+                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                }
+                OrderSide::Sell => {
+                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                }
+            };
+            if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
+                warn!(
+                    order_id = %order.id,
+                    reason = %sim_err,
+                    "Pre-submission simulation failed — skipping Jito bundle"
+                );
+                return Err(format!("simulation_rejected: {}", sim_err).into());
+            }
+            info!(order_id = %order.id, "Pre-submission simulation passed");
+        }
 
         // Attempt Jito bundle submission — retries once on any rejection before giving up.
         // Rejection includes both send_bundle() transport errors and bundle status "failed".
@@ -612,6 +655,7 @@ impl OrderManager {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
+            // Rebuild the transaction each attempt to obtain a fresh blockhash.
             let (trade_tx, _blockhash) = match order.side {
                 OrderSide::Buy => {
                     self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
@@ -1089,6 +1133,49 @@ impl OrderManagerMinimal {
         max_cost: u64,
         min_output: u64,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Dynamic tip: read floor/ceiling/percent from bot_config at order time.
+        let tip_percent = database::get_config_value(&self.db_pool.pool, "JITO_TIP_PERCENT")
+            .await
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.001);
+        let tip_floor = database::get_config_value(&self.db_pool.pool, "JITO_TIP_FLOOR_LAMPORTS")
+            .await
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5_000);
+        let tip_ceiling = database::get_config_value(&self.db_pool.pool, "JITO_TIP_CEILING_LAMPORTS")
+            .await
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10_000_000);
+        let tip_lamports = JitoClient::compute_dynamic_tip(order.amount, tip_percent, tip_floor, tip_ceiling);
+
+        // Pre-submission simulation: reject orders likely to fail on-chain before they
+        // consume a Jito bundle slot. Simulation failure is not transient so we run
+        // it once before the retry loop.
+        let sim_enabled = database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED")
+            .await
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
+        if sim_enabled {
+            let (sim_tx, _) = match order.side {
+                OrderSide::Buy => {
+                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                }
+                OrderSide::Sell => {
+                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                }
+            };
+            if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
+                warn!(
+                    order_id = %order.id,
+                    reason = %sim_err,
+                    "Pre-submission simulation failed — skipping Jito bundle"
+                );
+                return Err(format!("simulation_rejected: {}", sim_err).into());
+            }
+            info!(order_id = %order.id, "Pre-submission simulation passed");
+        }
+
         // Attempt Jito bundle submission — retries once on any rejection before giving up.
         // Rejection includes both send_bundle() transport errors and bundle status "failed".
         for jito_attempt in 0u32..2 {
@@ -1101,6 +1188,7 @@ impl OrderManagerMinimal {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
+            // Rebuild the transaction each attempt to obtain a fresh blockhash.
             let (trade_tx, _blockhash) = match order.side {
                 OrderSide::Buy => {
                     self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
