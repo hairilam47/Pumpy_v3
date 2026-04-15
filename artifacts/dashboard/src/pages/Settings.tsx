@@ -503,6 +503,7 @@ function WalletSetupGuide() {
       >
         <div className="px-3 pb-4 space-y-4 text-xs text-foreground/80">
           <div className="h-px bg-border/40" />
+          <p className="font-semibold text-sm text-foreground/90">How to set up your wallet</p>
 
           {/* Step 1 */}
           <div className="space-y-1.5">
