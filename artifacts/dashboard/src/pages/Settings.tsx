@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server,
-  Settings2, AlertTriangle, Save, Loader2, FlaskConical,
+  Settings2, AlertTriangle, Save, Loader2, FlaskConical, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -469,6 +469,129 @@ function ServiceUrlsCard({ config }: { config: ConfigMap }) {
   );
 }
 
+// ── Wallet Setup Guide ────────────────────────────────────────────────────────
+
+function Code({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="font-mono bg-secondary/60 rounded px-1 py-0.5 text-[11px] text-foreground/90 break-all">
+      {children}
+    </code>
+  );
+}
+
+function WalletSetupGuide() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="mt-3 rounded-lg border border-dashed border-border/60">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <span className="font-medium">Show setup guide</span>
+        {open ? (
+          <ChevronUp className="w-3.5 h-3.5 flex-shrink-0" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 flex-shrink-0" />
+        )}
+      </button>
+
+      <div
+        className={`overflow-hidden transition-all duration-300 ease-in-out ${
+          open ? "max-h-[600px] opacity-100" : "max-h-0 opacity-0"
+        }`}
+      >
+        <div className="px-3 pb-4 space-y-4 text-xs text-foreground/80">
+          <div className="h-px bg-border/40" />
+
+          {/* Step 1 */}
+          <div className="space-y-1.5">
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
+                1
+              </span>
+              <p className="font-semibold text-foreground/90">Generate a Solana keypair</p>
+            </div>
+            <p className="ml-7 text-muted-foreground">
+              If you have the Solana CLI installed, run:
+            </p>
+            <div className="ml-7 rounded bg-muted/50 px-3 py-2 font-mono text-[11px] text-foreground/80">
+              solana-keygen new --outfile ~/my-wallet.json
+            </div>
+            <p className="ml-7 text-muted-foreground">
+              Or generate one online at{" "}
+              <span className="text-primary">keypair.solana.com</span> and save the JSON file.
+            </p>
+          </div>
+
+          {/* Step 2 */}
+          <div className="space-y-1.5">
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
+                2
+              </span>
+              <p className="font-semibold text-foreground/90">Get the private key bytes</p>
+            </div>
+            <p className="ml-7 text-muted-foreground">
+              The keypair file contains a JSON array of 64 numbers — this is what you need.
+              View it with:
+            </p>
+            <div className="ml-7 rounded bg-muted/50 px-3 py-2 font-mono text-[11px] text-foreground/80">
+              cat ~/my-wallet.json
+            </div>
+            <div className="ml-7 rounded bg-yellow-500/10 border border-yellow-500/20 px-3 py-2 text-yellow-400 space-y-1">
+              <p className="font-semibold">Important:</p>
+              <p>
+                The output of <Code>solana-keygen pubkey</Code> is the <em>public key only</em> —
+                not usable here. You need the full 64-byte JSON array from the keypair file.
+              </p>
+            </div>
+            <p className="ml-7 text-muted-foreground">
+              Alternatively, paste your base58-encoded private key (64 bytes = 88 base58 chars).
+            </p>
+          </div>
+
+          {/* Step 3 */}
+          <div className="space-y-1.5">
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
+                3
+              </span>
+              <p className="font-semibold text-foreground/90">Add it to Replit Secrets</p>
+            </div>
+            <ol className="ml-7 text-muted-foreground space-y-1 list-decimal list-inside">
+              <li>Click the <strong className="text-foreground/80">padlock icon</strong> in the Replit left sidebar (Secrets)</li>
+              <li>Click <strong className="text-foreground/80">New secret</strong></li>
+              <li>
+                Set the key to <Code>WALLET_PRIVATE_KEY</Code>
+              </li>
+              <li>
+                Paste the JSON array (e.g. <Code>[12,34,56,…]</Code>) as the value
+              </li>
+              <li>Click <strong className="text-foreground/80">Add secret</strong></li>
+            </ol>
+          </div>
+
+          {/* Step 4 */}
+          <div className="space-y-1.5">
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-primary/15 text-primary flex items-center justify-center text-[10px] font-bold">
+                4
+              </span>
+              <p className="font-semibold text-foreground/90">Restart the Trading Engine</p>
+            </div>
+            <p className="ml-7 text-muted-foreground">
+              Click the <strong className="text-foreground/80">Restart</strong> button next to the{" "}
+              <Code>rust-engine: Trading Engine</Code> workflow in the Replit toolbar.
+              The wallet badge above will turn green and the Dashboard "Rust Engine" indicator will go live.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
@@ -552,11 +675,14 @@ export default function SettingsPage() {
                 <span className="font-mono">WALLET_PRIVATE_KEY</span> is set as a JSON byte array.
               </div>
             ) : (
-              <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON array)
-                in the <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
-                <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
-              </div>
+              <>
+                <div className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  Set <span className="font-mono">WALLET_PRIVATE_KEY</span> (base58 or JSON array)
+                  in the <span className="font-semibold">Replit Secrets panel</span>, or set{" "}
+                  <span className="font-mono">KEYPAIR_PATH</span> to a keypair file path.
+                </div>
+                <WalletSetupGuide />
+              </>
             )}
           </CardContent>
         </Card>
