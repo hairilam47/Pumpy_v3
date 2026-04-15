@@ -134,10 +134,15 @@ impl OrderManager {
             max_portfolio_exposure_sol: self.config.max_portfolio_exposure_sol,
             max_daily_loss_sol: self.config.max_daily_loss_sol,
             max_slippage_bps: self.config.max_slippage_bps,
-            // Sandwich check runs at execution time; pass 0 here so only the
-            // basic/risk rules gate the order at submission time.
+            // Sandwich check runs at execution time; pass 0 here so only
+            // basic + risk rules gate the order at submission time.
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: 0,
+            // Live portfolio state: full tracking arrives in Task #11.
+            // Passing 0.0 means exposure/loss checks pass at submission time;
+            // the checks are enforced with real values at execution time.
+            current_portfolio_exposure_sol: 0.0,
+            current_daily_loss_sol: 0.0,
             config_version: "v1",
         });
 
@@ -247,7 +252,7 @@ impl OrderManager {
         self.metrics.active_orders.inc();
         self.metrics.pending_orders.dec();
 
-        // MEV sandwich risk check via Decision Engine (execution-time gate)
+        // Execution-time Decision Engine gate (includes MEV sandwich risk)
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
         let exec_decision = self.decision_engine.evaluate(&DecisionContext {
@@ -260,6 +265,8 @@ impl OrderManager {
             max_slippage_bps: self.config.max_slippage_bps,
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: risk.score,
+            current_portfolio_exposure_sol: 0.0,
+            current_daily_loss_sol: 0.0,
             config_version: "v1",
         });
         if !exec_decision.is_allow() {
@@ -663,6 +670,8 @@ impl OrderManagerMinimal {
             max_slippage_bps: self.config.max_slippage_bps,
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: risk.score,
+            current_portfolio_exposure_sol: 0.0,
+            current_daily_loss_sol: 0.0,
             config_version: "v1",
         });
         if !exec_decision.is_allow() {

@@ -1,26 +1,13 @@
-/// The single Decision Engine — the ONLY authority that can approve or deny a trade.
-///
-/// All execution paths must call `evaluate()` and obey the result blindly:
-///   `Allow`  — trade is approved, execution may proceed.
-///   `Reject` — trade is denied for business/risk reasons; mark order Failed, no retry.
-///   `Halt`   — critical safety or config failure; stop the wallet worker.
-///
-/// No execution code may submit an on-chain transaction without first receiving
-/// an `Allow` decision from this engine.
-use tracing::{info, warn, error};
+use tracing::{warn, error};
 
 use crate::order::Order;
 
-// ─── Decision ────────────────────────────────────────────────────────────────
-
 /// The authoritative outcome for every trade request.
+/// All execution paths must call `evaluate()` and obey this blindly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-    /// Trade is approved — execution may proceed.
     Allow,
-    /// Trade is denied. The order must be marked Failed. No chain interaction occurs.
     Reject { reason: String },
-    /// Critical failure — the wallet worker must stop. Operator intervention required.
     Halt { reason: String },
 }
 
@@ -45,39 +32,27 @@ impl Decision {
     }
 }
 
-// ─── DecisionContext ──────────────────────────────────────────────────────────
-
 /// All inputs the Decision Engine needs to evaluate a single trade request.
-/// Callers must populate every field; the engine treats missing/zero values
-/// as policy violations, not errors.
 pub struct DecisionContext<'a> {
-    /// Identifier for the wallet submitting this order.
     pub wallet_id: &'a str,
-    /// The order under evaluation.
     pub order: &'a Order,
-    /// True when the engine started without a real wallet (ephemeral keypair).
     pub demo_mode: bool,
-    /// Maximum trade size in SOL. Sourced from system config.
     pub max_position_size_sol: f64,
-    /// Maximum total portfolio exposure in SOL. Sourced from system config.
     pub max_portfolio_exposure_sol: f64,
-    /// Maximum allowed daily loss in SOL. Sourced from system config.
     pub max_daily_loss_sol: f64,
-    /// Maximum allowed slippage in basis points. Sourced from system config.
     pub max_slippage_bps: u64,
-    /// MEV sandwich risk score computed for this order (0–100).
-    /// Pass 0 when evaluated before the sandwich check runs.
     pub max_sandwich_risk_score: u32,
-    /// The actual sandwich risk score for this specific order.
     pub sandwich_risk_score: u32,
-    /// Opaque string identifying the config snapshot (e.g. a hash or version counter).
-    /// Included in every structured log line for auditability.
+    /// Current total portfolio exposure in SOL (live value from portfolio tracker).
+    pub current_portfolio_exposure_sol: f64,
+    /// Current day's realized loss in SOL (positive = loss).
+    pub current_daily_loss_sol: f64,
+    /// Opaque config snapshot identifier for audit logs.
     pub config_version: &'a str,
 }
 
-// ─── DecisionEngine ──────────────────────────────────────────────────────────
-
-/// Single Decision Engine. Instantiate once per wallet worker and share via Arc.
+/// The single Decision Engine — the only authority that can approve or deny a trade.
+/// No code may submit an on-chain transaction without first receiving `Allow`.
 pub struct DecisionEngine;
 
 impl DecisionEngine {
@@ -87,71 +62,88 @@ impl DecisionEngine {
 
     /// Evaluate a trade request and return the authoritative Decision.
     ///
-    /// Rules are applied in strict priority order:
+    /// Rules applied in priority order:
     ///   1. Demo mode guard (Halt)
     ///   2. Basic parameter validation (Reject)
     ///   3. Position-size risk check (Reject)
-    ///   4. MEV / sandwich risk check (Reject)
-    ///   5. Allow
-    ///
-    /// Every outcome is logged with wallet_id, order_id, decision, reason,
-    /// and config_version for a full audit trail.
+    ///   4. Portfolio exposure limit (Reject)
+    ///   5. Daily loss limit (Reject)
+    ///   6. MEV / sandwich risk check (Reject)
+    ///   7. Allow
     pub fn evaluate(&self, ctx: &DecisionContext<'_>) -> Decision {
         let order = ctx.order;
 
-        // ── 1. Demo mode guard ────────────────────────────────────────────
         if ctx.demo_mode {
-            let reason = "Trading halted: no real wallet configured (demo mode). \
-                          Set WALLET_PRIVATE_KEY or KEYPAIR_PATH to enable live trading."
-                .to_string();
-            self.emit(ctx, Decision::Halt { reason })
+            return self.emit(ctx, Decision::Halt {
+                reason: "no real wallet configured (demo mode); \
+                         set WALLET_PRIVATE_KEY or KEYPAIR_PATH to enable live trading"
+                    .to_string(),
+            });
         }
-        // ── 2. Basic parameter validation ─────────────────────────────────
-        else if order.amount == 0 {
-            self.emit(ctx, Decision::Reject {
+
+        if order.amount == 0 {
+            return self.emit(ctx, Decision::Reject {
                 reason: "amount must be greater than zero".to_string(),
-            })
-        } else if order.slippage_bps > ctx.max_slippage_bps {
-            self.emit(ctx, Decision::Reject {
+            });
+        }
+
+        if order.slippage_bps > ctx.max_slippage_bps {
+            return self.emit(ctx, Decision::Reject {
                 reason: format!(
                     "slippage_bps={} exceeds allowed maximum of {}",
                     order.slippage_bps, ctx.max_slippage_bps
                 ),
-            })
+            });
         }
-        // ── 3. Position-size risk check ───────────────────────────────────
-        else if (order.amount as f64 / 1_000_000_000.0) > ctx.max_position_size_sol {
-            let trade_sol = order.amount as f64 / 1_000_000_000.0;
-            self.emit(ctx, Decision::Reject {
+
+        let trade_sol = order.amount as f64 / 1_000_000_000.0;
+        if trade_sol > ctx.max_position_size_sol {
+            return self.emit(ctx, Decision::Reject {
                 reason: format!(
                     "trade size {:.4} SOL exceeds max position size {:.4} SOL",
                     trade_sol, ctx.max_position_size_sol
                 ),
-            })
+            });
         }
-        // ── 4. MEV / sandwich risk check ──────────────────────────────────
-        else if ctx.sandwich_risk_score > ctx.max_sandwich_risk_score {
-            self.emit(ctx, Decision::Reject {
+
+        let projected_exposure = ctx.current_portfolio_exposure_sol + trade_sol;
+        if projected_exposure > ctx.max_portfolio_exposure_sol {
+            return self.emit(ctx, Decision::Reject {
+                reason: format!(
+                    "projected portfolio exposure {:.4} SOL would exceed limit {:.4} SOL",
+                    projected_exposure, ctx.max_portfolio_exposure_sol
+                ),
+            });
+        }
+
+        if ctx.current_daily_loss_sol > ctx.max_daily_loss_sol {
+            return self.emit(ctx, Decision::Reject {
+                reason: format!(
+                    "daily loss {:.4} SOL has exceeded limit {:.4} SOL",
+                    ctx.current_daily_loss_sol, ctx.max_daily_loss_sol
+                ),
+            });
+        }
+
+        if ctx.sandwich_risk_score > ctx.max_sandwich_risk_score {
+            return self.emit(ctx, Decision::Reject {
                 reason: format!(
                     "sandwich risk score={} exceeds max={}",
                     ctx.sandwich_risk_score, ctx.max_sandwich_risk_score
                 ),
-            })
+            });
         }
-        // ── 5. Allow ──────────────────────────────────────────────────────
-        else {
-            self.emit(ctx, Decision::Allow)
-        }
+
+        self.emit(ctx, Decision::Allow)
     }
 
-    /// Log the decision and return it.
     fn emit(&self, ctx: &DecisionContext<'_>, decision: Decision) -> Decision {
         let label = decision.label();
         let reason = decision.reason();
 
         match &decision {
             Decision::Allow => {
-                info!(
+                warn!(
                     decision = label,
                     wallet_id = ctx.wallet_id,
                     order_id = ctx.order.id,
