@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, broadcast, Semaphore};
@@ -60,10 +62,12 @@ pub struct OrderManager {
     event_tx: broadcast::Sender<OrderEvent>,
     config: OrderManagerConfig,
     mev_enabled: bool,
-    /// The single Decision Engine — all order gating flows through here.
     decision_engine: Arc<DecisionEngine>,
-    /// True when started without a real wallet (ephemeral keypair / demo mode).
     demo_mode: bool,
+    /// Real wallet public key used as audit identity in every DecisionEngine log.
+    wallet_pubkey: String,
+    /// Deterministic fingerprint of current risk-limit config for audit logs.
+    config_version_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +97,9 @@ impl OrderManager {
         let (order_tx, order_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(1000);
 
+        let wallet_pubkey = pumpfun_client.pubkey().to_string();
+        let config_version_hash = Self::compute_config_hash(&config);
+
         Self {
             db_pool,
             pumpfun_client,
@@ -109,7 +116,21 @@ impl OrderManager {
             mev_enabled,
             decision_engine,
             demo_mode,
+            wallet_pubkey,
+            config_version_hash,
         }
+    }
+
+    /// Compute a deterministic short hash of the risk-limit config snapshot.
+    /// Changes whenever any limit is modified, enabling audit log correlation.
+    fn compute_config_hash(cfg: &OrderManagerConfig) -> String {
+        let mut h = DefaultHasher::new();
+        ((cfg.max_position_size_sol * 1_000.0) as u64).hash(&mut h);
+        ((cfg.max_portfolio_exposure_sol * 1_000.0) as u64).hash(&mut h);
+        ((cfg.max_daily_loss_sol * 1_000.0) as u64).hash(&mut h);
+        cfg.max_slippage_bps.hash(&mut h);
+        cfg.max_sandwich_risk_score.hash(&mut h);
+        format!("{:08x}", h.finish() & 0xFFFF_FFFF)
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<OrderEvent> {
@@ -126,8 +147,15 @@ impl OrderManager {
         // Assign a provisional ID so the DecisionEngine can log it.
         order.id = Uuid::new_v4().to_string();
 
+        // Current exposure = sum of in-flight order amounts (best available proxy
+        // until Task #11 adds a proper position-tracking DB table).
+        let current_exposure_sol = {
+            let active = self.active_orders.read().await;
+            active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum::<f64>()
+        };
+
         let decision = self.decision_engine.evaluate(&DecisionContext {
-            wallet_id: "wallet_001",
+            wallet_id: &self.wallet_pubkey,
             order: &order,
             demo_mode: self.demo_mode,
             max_position_size_sol: self.config.max_position_size_sol,
@@ -138,12 +166,10 @@ impl OrderManager {
             // basic + risk rules gate the order at submission time.
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: 0,
-            // Live portfolio state: full tracking arrives in Task #11.
-            // Passing 0.0 means exposure/loss checks pass at submission time;
-            // the checks are enforced with real values at execution time.
-            current_portfolio_exposure_sol: 0.0,
+            current_portfolio_exposure_sol: current_exposure_sol,
+            // Daily loss tracking requires a DB table (Task #11); 0.0 for now.
             current_daily_loss_sol: 0.0,
-            config_version: "v1",
+            config_version: &self.config_version_hash,
         });
 
         match decision {
@@ -255,8 +281,12 @@ impl OrderManager {
         // Execution-time Decision Engine gate (includes MEV sandwich risk)
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+        let current_exposure_sol = {
+            let active = self.active_orders.read().await;
+            active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum::<f64>()
+        };
         let exec_decision = self.decision_engine.evaluate(&DecisionContext {
-            wallet_id: "wallet_001",
+            wallet_id: &self.wallet_pubkey,
             order: &order,
             demo_mode: self.demo_mode,
             max_position_size_sol: self.config.max_position_size_sol,
@@ -265,9 +295,9 @@ impl OrderManager {
             max_slippage_bps: self.config.max_slippage_bps,
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: risk.score,
-            current_portfolio_exposure_sol: 0.0,
+            current_portfolio_exposure_sol: current_exposure_sol,
             current_daily_loss_sol: 0.0,
-            config_version: "v1",
+            config_version: &self.config_version_hash,
         });
         if !exec_decision.is_allow() {
             order.status = OrderStatus::Failed;
@@ -559,6 +589,8 @@ impl OrderManager {
             mev_enabled: self.mev_enabled,
             decision_engine: self.decision_engine.clone(),
             demo_mode: self.demo_mode,
+            wallet_pubkey: self.wallet_pubkey.clone(),
+            config_version_hash: self.config_version_hash.clone(),
         }
     }
 
@@ -644,6 +676,8 @@ struct OrderManagerMinimal {
     mev_enabled: bool,
     decision_engine: Arc<DecisionEngine>,
     demo_mode: bool,
+    wallet_pubkey: String,
+    config_version_hash: String,
 }
 
 impl OrderManagerMinimal {
@@ -660,8 +694,12 @@ impl OrderManagerMinimal {
 
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+        let current_exposure_sol = {
+            let active = self.active_orders.read().await;
+            active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum::<f64>()
+        };
         let exec_decision = self.decision_engine.evaluate(&DecisionContext {
-            wallet_id: "wallet_001",
+            wallet_id: &self.wallet_pubkey,
             order: &order,
             demo_mode: self.demo_mode,
             max_position_size_sol: self.config.max_position_size_sol,
@@ -670,9 +708,9 @@ impl OrderManagerMinimal {
             max_slippage_bps: self.config.max_slippage_bps,
             max_sandwich_risk_score: self.config.max_sandwich_risk_score,
             sandwich_risk_score: risk.score,
-            current_portfolio_exposure_sol: 0.0,
+            current_portfolio_exposure_sol: current_exposure_sol,
             current_daily_loss_sol: 0.0,
-            config_version: "v1",
+            config_version: &self.config_version_hash,
         });
         if !exec_decision.is_allow() {
             order.status = OrderStatus::Failed;
