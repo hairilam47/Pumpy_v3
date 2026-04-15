@@ -117,6 +117,7 @@ impl WorkerFactory {
 
 /// Write keypair bytes to a secure temp file.
 /// Uses a nanosecond-nonce suffix, mode 0o600.  Path is not logged.
+/// Caller is responsible for cleanup (see cleanup_temp_keypair).
 fn materialize_keypair(keypair_bytes: &[u8]) -> Option<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -136,6 +137,14 @@ fn materialize_keypair(keypair_bytes: &[u8]) -> Option<String> {
         .ok()?;
     f.write_all(json.as_bytes()).ok()?;
     Some(path)
+}
+
+fn cleanup_temp_keypair(path: Option<&str>) {
+    if let Some(p) = path {
+        if p.starts_with("/tmp/.kp") {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 #[tokio::main]
@@ -291,13 +300,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bootstrap: if registry is empty, auto-register wallet_001 with a usable keypair_path.
     // Resolution: KEYPAIR_PATH env var → materialize bytes to a secure temp file.
+    // The materialized_kp_path is kept to allow cleanup on shutdown.
     let primary_pubkey = primary_pumpfun_client.pubkey().to_string();
-    {
+    let materialized_kp_path: Option<String> = {
         let all_wallets = database::load_wallet_registry(&db_pool.pool).await;
         if all_wallets.is_empty() {
-            let keypair_path = std::env::var("KEYPAIR_PATH")
-                .ok()
-                .or_else(|| materialize_keypair(&config.keypair_bytes));
+            let env_path = std::env::var("KEYPAIR_PATH").ok();
+            let mat_path = if env_path.is_none() {
+                materialize_keypair(&config.keypair_bytes)
+            } else {
+                None
+            };
+            let keypair_path = env_path.or_else(|| mat_path.clone());
 
             if keypair_path.is_some() {
                 info!("wallet_registry empty — registering wallet_001 with keypair");
@@ -316,10 +330,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(_) => info!("wallet_001 registered"),
                 Err(e) => warn!("Could not auto-register wallet_001: {}", e),
             }
+            mat_path
         } else {
             info!("wallet_registry: {} wallet(s)", all_wallets.len());
+            None
         }
-    }
+    };
 
     let factory = Arc::new(WorkerFactory {
         db_pool: db_pool.clone(),
@@ -511,6 +527,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
+    cleanup_temp_keypair(materialized_kp_path.as_deref());
     info!("PumpFun Trading Engine stopped");
     Ok(())
 }
