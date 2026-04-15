@@ -1,0 +1,145 @@
+# PumpyPumpyFunBotTrade — Gap Analysis & Recommendations
+
+> Based on architecture review of `ARCHITECTURE.md` (April 2026)  
+> A high-performance, three-engine automated trading bot for Pump.fun on Solana
+
+---
+
+## Table of Contents
+
+1. [Overall Assessment](#1-overall-assessment)
+2. [Gap Analysis by Component](#2-gap-analysis-by-component)
+   - 2.1 [Rust Execution Engine](#21-rust-execution-engine)
+   - 2.2 [Python Strategy Engine](#22-python-strategy-engine)
+   - 2.3 [Node.js API Server & Database](#23-nodejs-api-server--database)
+   - 2.4 [React Dashboard](#24-react-dashboard)
+   - 2.5 [Infrastructure & Observability](#25-infrastructure--observability)
+   - 2.6 [Documentation](#26-documentation)
+3. [Priority Matrix](#3-priority-matrix)
+4. [Actionable Next Steps](#4-actionable-next-steps)
+
+---
+
+## 1. Overall Assessment
+
+The architecture is **impressively well‑structured** with clear separation of concerns, robust MEV protection, and a thoughtful auto‑pause mechanism. The foundation is production‑ready, but several targeted improvements will elevate it to **battle‑hardened reliability**.
+
+**Strengths:**
+- ✅ Clean multi‑engine design (Rust / Python / Node)
+- ✅ Self‑healing auto‑pause with wallet alerts
+- ✅ Preset‑based risk management
+- ✅ Strong security posture (admin key, keypair path exclusion)
+
+**Opportunities:**
+- Add retry logic and dynamic slippage
+- Improve WebSocket scalability and idempotency
+- Enhance observability with distributed tracing
+
+---
+
+## 2. Gap Analysis by Component
+
+### 2.1 Rust Execution Engine
+
+| Gap | Impact | Recommendation | Priority |
+|-----|--------|----------------|----------|
+| **No transaction retry with backoff** | Temporary RPC congestion or Jito bundle rejections cause unnecessary failures | Implement exponential backoff in `OrderManager`. For Jito, retry once after 2s before falling back to direct RPC | 🔴 High |
+| **Static slippage calculation** | `SandwichDetector` scores risk but doesn't adjust slippage based on pool depth | Integrate `bonding_curve::calculate_price_impact()` into `DecisionEngine` to set dynamic `max_sol_cost` / `min_sol_output` | 🔴 High |
+| **Fixed Jito tip** | Default 10,000 lamports may be insufficient during high MEV activity | Make tip dynamic based on `JITO_TIP_PERCENT` of trade value, or fetch from `bot_config` | 🟡 Medium |
+| **No pre‑submission simulation** | Failed simulations waste bundle slots and delay execution | Call `simulateTransaction` on a backup RPC before constructing the Jito bundle | 🟡 Medium |
+
+### 2.2 Python Strategy Engine
+
+| Gap | Impact | Recommendation | Priority |
+|-----|--------|----------------|----------|
+| **No state persistence for ML models** | Restarting the engine loses trained models and historical buffers | Serialize models to disk (joblib/pickle) and reload on startup; store rolling buffers in Redis | 🟡 Medium |
+| **Missing backtesting integration** | Cannot validate new presets or parameters historically | Add `/api/backtest` endpoint that runs strategies against `token_metrics` table | 🟢 Low |
+| **No circuit breaker on gRPC connection** | If Rust engine is down, Python may queue signals indefinitely or crash | Implement circuit breaker pattern in gRPC client; after N failures, pause signals and alert | 🟡 Medium |
+| **Strategy metrics incomplete** | Lacks Sharpe ratio, max drawdown, and volatility | Compute and expose these in `/api/metrics` response | 🟢 Low |
+
+### 2.3 Node.js API Server & Database
+
+| Gap | Impact | Recommendation | Priority |
+|-----|--------|----------------|----------|
+| **WebSocket connection fan‑out** | Each dashboard client opens its own gRPC stream to Rust, risking overload | Implement single gRPC stream from Node to Rust, then fan‑out to WebSocket clients | 🟡 Medium |
+| **Missing client order ID** | `trades` table has `signature` but no `client_order_id`; tracking across retries is difficult | Add `client_order_id UUID` column and generate it in Python/Rust before submission | 🟡 Medium |
+| **No idempotency key** | Network glitches could cause duplicate `SubmitOrder` calls | Add `idempotency_key` field to gRPC request; validate against Redis cache of recent orders | 🟡 Medium |
+| **Missing database indexes** | Queries like "trades per wallet per day" will degrade as data grows | Create indexes on: `trades(wallet_id, created_at)`, `trades(mint, created_at)`, `wallet_alerts(wallet_id, created_at)` | 🔴 High |
+
+### 2.4 React Dashboard
+
+| Gap | Impact | Recommendation | Priority |
+|-----|--------|----------------|----------|
+| **No offline indicator** | UI may show stale data without warning if WebSocket disconnects | Add connectivity status banner that appears when WebSocket is closed/reconnecting | 🟢 Low |
+| **Missing PnL chart** | Only current PnL is shown, no historical equity curve | Add line chart (recharts) showing portfolio value over last 24h/7d | 🟢 Low |
+| **Repeated admin key prompts** | Operators must re‑enter key for every action | Cache admin key in memory for session duration with "Remember for 1 hour" checkbox | 🟢 Low |
+
+### 2.5 Infrastructure & Observability
+
+| Gap | Impact | Recommendation | Priority |
+|-----|--------|----------------|----------|
+| **No distributed tracing** | Debugging cross‑service failures (Rust → Python → Node) is challenging | Inject `trace-id` header at gRPC boundary; log consistently across all services | 🟢 Low |
+| **Missing database health check** | Rust engine may panic or hang if PostgreSQL is unavailable | Add readiness probe that fails if `db_pool.acquire()` times out | 🟡 Medium |
+| **No backup/restore procedure** | Critical wallet configs and trade history at risk | Document `pg_dump` cron job; test restore process | 🟡 Medium |
+
+### 2.6 Documentation
+
+| Gap | Recommendation |
+|-----|----------------|
+| **No incident runbook** | Create runbook for: recovering halted wallets, Jito bundle failures, RPC fallback |
+| **Missing performance benchmarks** | Document expected end‑to‑end latency (token discovery → transaction submission) |
+| **No security incident response plan** | Define steps to rotate compromised wallet keys and revoke admin key |
+
+---
+
+## 3. Priority Matrix
+
+| Priority | Component | Gap | Action |
+|----------|-----------|-----|--------|
+| 🔴 **High** | Rust | No retry logic | Implement exponential backoff for RPC/Jito |
+| 🔴 **High** | Rust | Static slippage | Use bonding curve math for dynamic maxCost/minOutput |
+| 🔴 **High** | Database | Missing indexes | Add indexes to `trades` and `wallet_alerts` |
+| 🟡 **Medium** | Node | WebSocket fan‑out | Single gRPC stream → multiple WebSocket clients |
+| 🟡 **Medium** | Rust/Python | Idempotency | Add idempotency key to prevent duplicate orders |
+| 🟡 **Medium** | Python | Circuit breaker | Add gRPC connection circuit breaker |
+| 🟡 **Medium** | Python | Model persistence | Save/load ML models and buffers |
+| 🟡 **Medium** | Rust | Dynamic Jito tip | Make tip percentage configurable |
+| 🟡 **Medium** | Rust | Pre‑submission simulation | Simulate before bundle construction |
+| 🟡 **Medium** | Infra | DB health check | Add readiness probe for PostgreSQL |
+| 🟡 **Medium** | Infra | Backup/restore | Document and test backup procedure |
+| 🟢 **Low** | Dashboard | Offline indicator | Add WebSocket connectivity banner |
+| 🟢 **Low** | Dashboard | PnL chart | Add equity curve visualization |
+| 🟢 **Low** | Dashboard | Admin key prompt | Add session‑based caching |
+| 🟢 **Low** | Python | Backtesting | Expose historical validation endpoint |
+| 🟢 **Low** | Python | Advanced metrics | Add Sharpe, drawdown, volatility |
+| 🟢 **Low** | Observability | Distributed tracing | Inject trace‑id across services |
+| 🟢 **Low** | Documentation | Runbooks | Create incident response guides |
+
+---
+
+## 4. Actionable Next Steps
+
+### Immediate (Week 1)
+1. Add database indexes to `trades` and `wallet_alerts`
+2. Implement exponential backoff retry in Rust `OrderManager`
+3. Integrate dynamic slippage calculation from bonding curve math
+
+### Short‑Term (Weeks 2‑3)
+4. Add idempotency key support across gRPC boundary
+5. Refactor Node WebSocket to fan‑out from a single gRPC stream
+6. Implement circuit breaker in Python gRPC client
+7. Add Jito tip percentage configuration
+
+### Medium‑Term (Month 1)
+8. Implement ML model persistence and Redis buffer store
+9. Add pre‑submission transaction simulation
+10. Document backup/restore procedures and incident runbooks
+
+### Nice‑to‑Have
+11. Dashboard offline banner and PnL chart
+12. Distributed tracing with trace‑id propagation
+13. Backtesting endpoint in Python engine
+
+---
+
+*Analysis compiled from live codebase review — April 2026*
