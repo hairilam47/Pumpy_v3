@@ -208,28 +208,36 @@ impl Config {
         let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
 
         // Resolve keypair bytes from WALLET_PRIVATE_KEY (base58 or JSON array) OR KEYPAIR_PATH file.
-        // In non-production environments, fall back to an ephemeral keypair (demo mode) so the
-        // gRPC server and monitoring stack can start without a real wallet configured.
-        let (keypair_bytes, demo_mode) = match load_keypair_bytes() {
-            Ok(bytes) => (bytes, false),
-            Err(err) if environment != "production" => {
-                let ephemeral = Keypair::new();
-                tracing::warn!(
-                    "╔══════════════════════════════════════════════════════════════╗"
-                );
-                tracing::warn!(
-                    "║  DEMO MODE — ephemeral keypair generated, trading disabled  ║"
-                );
-                tracing::warn!(
-                    "║  Set WALLET_PRIVATE_KEY in Replit Secrets to trade live.    ║"
-                );
-                tracing::warn!(
-                    "╚══════════════════════════════════════════════════════════════╝"
-                );
-                tracing::warn!("Wallet config error (ignored in dev): {}", err);
-                (ephemeral.to_bytes().to_vec(), true)
-            }
-            Err(err) => return Err(err),
+        //
+        // Demo mode logic (non-production only):
+        //   • If BOTH env vars are absent → generate ephemeral keypair, set demo_mode=true.
+        //     This lets the gRPC server and monitoring stack start without a real wallet.
+        //   • If EITHER env var is present but malformed → hard-fail immediately (misconfiguration
+        //     should not be silently swallowed).
+        //   • In production → always hard-fail; ephemeral keys must never be used in prod.
+        let wallet_key_present = env::var("WALLET_PRIVATE_KEY").is_ok();
+        let keypair_path_present = env::var("KEYPAIR_PATH").is_ok();
+        let no_wallet_configured = !wallet_key_present && !keypair_path_present;
+
+        let (keypair_bytes, demo_mode) = if no_wallet_configured && environment != "production" {
+            // Neither env var set — safe to enter demo mode
+            let ephemeral = Keypair::new();
+            tracing::warn!(
+                "╔══════════════════════════════════════════════════════════════╗"
+            );
+            tracing::warn!(
+                "║  DEMO MODE — ephemeral keypair generated, trading disabled  ║"
+            );
+            tracing::warn!(
+                "║  Set WALLET_PRIVATE_KEY in Replit Secrets to trade live.    ║"
+            );
+            tracing::warn!(
+                "╚══════════════════════════════════════════════════════════════╝"
+            );
+            (ephemeral.to_bytes().to_vec(), true)
+        } else {
+            // Wallet env var(s) are present (or we are in production) — parse and hard-fail on error
+            (load_keypair_bytes()?, false)
         };
 
         Ok(Self {

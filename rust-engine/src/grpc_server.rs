@@ -50,11 +50,9 @@ impl Bot for BotService {
         request: Request<SubmitOrderRequest>,
     ) -> Result<Response<SubmitOrderResponse>, Status> {
         if self.demo_mode {
-            return Ok(Response::new(SubmitOrderResponse {
-                order_id: String::new(),
-                success: false,
-                message: "Trading disabled — set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading".to_string(),
-            }));
+            return Err(Status::failed_precondition(
+                "Trading disabled: set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading",
+            ));
         }
         let req = request.into_inner();
         info!("SubmitOrder: {} {} {}", req.side, req.token_mint, req.amount);
@@ -112,10 +110,9 @@ impl Bot for BotService {
         request: Request<CancelOrderRequest>,
     ) -> Result<Response<CancelOrderResponse>, Status> {
         if self.demo_mode {
-            return Ok(Response::new(CancelOrderResponse {
-                success: false,
-                message: "Trading disabled — set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading".to_string(),
-            }));
+            return Err(Status::failed_precondition(
+                "Trading disabled: set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading",
+            ));
         }
         let order_id = request.into_inner().order_id;
         info!("CancelOrder: {}", order_id);
