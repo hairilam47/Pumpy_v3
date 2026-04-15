@@ -281,9 +281,13 @@ impl OrderManager {
         // Execution-time Decision Engine gate (includes MEV sandwich risk)
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+        // Exclude the current order from the exposure sum — it was already inserted into
+        // active_orders above, so subtracting avoids double-counting it against the limit.
         let current_exposure_sol = {
             let active = self.active_orders.read().await;
-            active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum::<f64>()
+            let total: f64 = active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum();
+            let this_sol = order.amount as f64 / 1_000_000_000.0;
+            (total - this_sol).max(0.0)
         };
         let exec_decision = self.decision_engine.evaluate(&DecisionContext {
             wallet_id: &self.wallet_pubkey,
@@ -694,9 +698,13 @@ impl OrderManagerMinimal {
 
         let accounts = vec![order.mint.clone()];
         let risk = self.mev_protector.analyze_sandwich_risk(&order.mint, &accounts).await;
+        // Exclude the current order from the exposure sum — it was already inserted into
+        // active_orders above, so subtracting avoids double-counting it against the limit.
         let current_exposure_sol = {
             let active = self.active_orders.read().await;
-            active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum::<f64>()
+            let total: f64 = active.values().map(|o| o.amount as f64 / 1_000_000_000.0).sum();
+            let this_sol = order.amount as f64 / 1_000_000_000.0;
+            (total - this_sol).max(0.0)
         };
         let exec_decision = self.decision_engine.evaluate(&DecisionContext {
             wallet_id: &self.wallet_pubkey,
