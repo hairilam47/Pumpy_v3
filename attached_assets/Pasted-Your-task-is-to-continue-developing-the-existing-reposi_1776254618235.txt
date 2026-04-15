@@ -1,0 +1,225 @@
+Your task is to continue developing the existing repository with the following
+non‑negotiable architectural principles. Do NOT implement shortcuts or simplified
+alternatives unless explicitly instructed.
+ 
+=================================
+CORE ARCHITECTURAL RULES
+=================================
+ 
+1. SEPARATION OF CONCERNS (MANDATORY)
+- UI must NEVER:
+  - read private keys
+  - read environment secrets
+  - trigger execution directly
+- Execution must NEVER:
+  - read UI state
+  - read wallet config directly
+- All trade permission must come from a SINGLE Decision Engine.
+ 
+2. DECISION GOVERNANCE (MANDATORY)
+- There must be exactly ONE Decision Engine that returns:
+  - ALLOW
+  - REJECT
+  - HALT
+- Execution code must obey this blindly.
+- No execution path may bypass this engine.
+ 
+3. CONFIGURATION DISCIPLINE (MANDATORY)
+There are exactly four configuration layers:
+ 
+A. Secrets (.env, backend only)
+- RPC URLs
+- Private keys
+- Encryption material
+ 
+B. System config (operator‑only, versioned)
+- Risk caps
+- Emergency halt thresholds
+- Strategy availability
+- Discovery thresholds (DexScreener)
+ 
+C. Wallet config (client‑editable, validated)
+- Risk per trade
+- Daily loss limits
+- Strategy preset (NOT raw math)
+- Wallet lifecycle (enabled / paused / halted)
+ 
+D. UI preferences (read‑only to backend)
+- Refresh rate
+- Display settings
+ 
+If a variable does not clearly belong to one layer, it must be reconsidered.
+ 
+=================================
+WALLET ARCHITECTURE (WALLET‑AGNOSTIC)
+=================================
+ 
+IMPORTANT:
+This platform must NOT be tied to a single wallet provider.
+It must support multiple wallet platforms in a future‑proof way.
+ 
+-----------------------------
+1. Control / Identity Wallets
+-----------------------------
+ 
+Examples (not limited to):
+- Phantom
+- Solflare
+- Backpack
+- Ledger
+- WalletConnect‑compatible wallets
+ 
+Rules:
+- These wallets are used ONLY for:
+  - UI authentication
+  - ownership verification
+  - user identity
+  - dashboard access
+- Control wallets must NEVER:
+  - sign automated trades
+  - store execution private keys
+  - be required to stay online for bots to run
+ 
+Phantom is ONE supported option, not a requirement.
+ 
+-----------------------------
+2. Execution Wallets (MANDATORY)
+-----------------------------
+ 
+- Automated trading MUST use backend‑managed execution wallets
+- Each execution wallet is:
+  - a Solana keypair
+  - stored as a file on the backend (keypair_path)
+  - isolated per wallet configuration
+- One execution wallet per bot / per risk envelope
+ 
+Example mapping:
+wallet_001.yaml →
+  keypair_path: /keys/wallet_001.json
+ 
+Rules:
+- UI never handles private keys
+- Control wallets never sign trades
+- Execution wallets never authenticate users
+ 
+-----------------------------
+3. Wallet Linking (Metadata Only)
+-----------------------------
+ 
+- Control wallets may be associated with execution wallets
+  ONLY as metadata (ownership mapping)
+- No private key material is ever transferred to UI
+- Control wallets approve creation, pausing, or destruction
+  of execution wallets — never sign trades
+ 
+=================================
+STEP‑BASED IMPLEMENTATION
+=================================
+ 
+Implement in this order ONLY:
+ 
+STEP 1 — Multi‑Wallet Worker Orchestration
+- One logical worker per wallet config
+- Shared system config
+- No shared mutable wallet state
+- Failure isolation between wallets
+ 
+STEP 2 — Production Runtime Hardening
+- systemd service for bot
+- Auto‑restart on crash
+- Deterministic startup and shutdown
+ 
+STEP 3 — Structured Logging
+- All logs must be structured (JSON)
+- Logs MUST include:
+  - timestamp
+  - wallet_id
+  - decision (ALLOW / REJECT / HALT)
+  - reason
+  - config version/hash
+ 
+STEP 4 — Alert Escalation Policy
+- Auto‑pause wallet on repeated validation errors
+- Auto‑halt wallet on critical failures
+- Notify operator (human notified, not required to keep bot safe)
+ 
+STEP 5 — Wallet Registry Layer
+- Backend registry of wallets
+- Track wallet status, ownership, last activity
+- UI-driven lifecycle management
+- No direct file manipulation from UI
+ 
+=================================
+DEXSCREENER INTEGRATION
+=================================
+ 
+DexScreener is an INFORMATIONAL source only.
+ 
+Rules:
+- DexScreener decides "what to look at"
+- Decision Engine decides "what is allowed"
+- Execution decides nothing
+ 
+Map DexScreener fields into a Context object:
+- token_address
+- pair_address
+- liquidity_usd
+- volume (5m, 15m, 1h)
+- price_usd
+- price_change (5m, 15m, 1h)
+- buys/sells
+- age_minutes
+ 
+DexScreener thresholds belong ONLY in system config.
+ 
+=================================
+FAIL‑CLOSED REQUIREMENTS
+=================================
+ 
+- Invalid config must halt wallet
+- Missing config must halt wallet
+- Unknown config fields must be rejected
+- Execution must never continue on error
+ 
+=================================
+USER EXPERIENCE REQUIREMENTS
+=================================
+ 
+- Users should NEVER paste private keys
+- Wallet setup must feel:
+  - guided
+  - safe
+  - reversible
+- Strategy exposure must be via presets:
+  - conservative
+  - balanced
+  - aggressive
+- UI controls intent, not mechanics
+ 
+=================================
+ACCEPTANCE CRITERIA
+=================================
+ 
+The implementation is correct ONLY if:
+- Restarting the bot does NOT change behavior
+- Pausing a wallet guarantees zero trades
+- UI always reflects persisted config
+- No trade occurs without Decision Engine approval
+- Wallet failure does not affect other wallets
+- Wallet provider choice does not affect execution logic
+ 
+=================================
+DELIVERABLE EXPECTATION
+=================================
+ 
+Write clear, maintainable, production‑quality code.
+ 
+Do NOT:
+- expose secrets to UI
+- store private keys in Replit secrets for production
+- embed trading logic in UI
+- bypass the Decision Engine
+- hard‑code to a single wallet provider
+ 
+If in doubt, prioritize:
+safety > determinism > clarity > speed.
