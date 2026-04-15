@@ -32,17 +32,11 @@ use pumpfun::PumpFunClient;
 use rpc::RpcManager;
 use wallet_worker::{WalletWorker, WalletWorkerConfig, MAX_RESTART_ATTEMPTS};
 
-/// Result of attempting to build a WalletWorker from a registry entry.
 enum BuildOutcome {
-    /// Successfully built — ready to spawn.
     Built(WalletWorker),
-    /// keypair_path missing or invalid — track as a failure; caller should halt wallet.
     Failed(String),
 }
 
-/// Shared immutable configuration threaded to the supervisor and watcher tasks.
-/// Does NOT own JoinSet, active_ids, or failure_counts — those live exclusively
-/// inside the supervisor task to avoid Mutex-held-across-await deadlocks.
 #[derive(Clone)]
 struct WorkerFactory {
     db_pool: DatabasePool,
@@ -63,40 +57,21 @@ struct WorkerFactory {
 }
 
 impl WorkerFactory {
-    /// Attempt to build a `WalletWorker` from a registry entry.
-    ///
-    /// Returns:
-    /// - `Built(worker)` — keypair loaded and worker ready to spawn.
-    /// - `Failed(msg)`   — no keypair_path, or path unreadable/malformed.
-    ///                     Caller should track failures and halt after N attempts.
-    ///
-    /// NOTE: all enabled registry entries are expected to have a usable keypair_path.
-    ///       Entries without one are a configuration error and must be halted, not silently
-    ///       skipped — which is why this function no longer returns a NoPath variant.
     fn build(&self, entry: WalletFullEntry) -> BuildOutcome {
         let wallet_id = entry.wallet_id.clone();
 
         let kp_path = match &entry.keypair_path {
             Some(p) if !p.is_empty() => p.clone(),
             _ => {
-                // enabled wallet has no keypair_path — configuration error
-                return BuildOutcome::Failed(format!(
-                    "enabled wallet '{}' has no keypair_path configured",
-                    wallet_id
-                ));
+                return BuildOutcome::Failed(format!("wallet '{}' has no keypair_path", wallet_id));
             }
         };
 
         let raw = match std::fs::read_to_string(&kp_path) {
             Ok(s) => s,
             Err(e) => {
-                error!(
-                    wallet_id = %wallet_id,
-                    path = %kp_path,
-                    "Failed to read keypair file: {}",
-                    e
-                );
-                return BuildOutcome::Failed(format!("Read error: {}", e));
+                error!(wallet_id = %wallet_id, "Failed to read keypair file: {}", e);
+                return BuildOutcome::Failed(format!("read error: {}", e));
             }
         };
 
@@ -104,20 +79,13 @@ impl WorkerFactory {
             Ok(b) => b,
             Err(e) => {
                 error!(wallet_id = %wallet_id, "Keypair file invalid JSON: {}", e);
-                return BuildOutcome::Failed(format!("Invalid JSON: {}", e));
+                return BuildOutcome::Failed(format!("invalid JSON: {}", e));
             }
         };
 
         if keypair_bytes.len() != 64 {
-            error!(
-                wallet_id = %wallet_id,
-                got = keypair_bytes.len(),
-                "Keypair must be 64 bytes"
-            );
-            return BuildOutcome::Failed(format!(
-                "Expected 64 bytes, got {}",
-                keypair_bytes.len()
-            ));
+            error!(wallet_id = %wallet_id, got = keypair_bytes.len(), "Keypair must be 64 bytes");
+            return BuildOutcome::Failed(format!("expected 64 bytes, got {}", keypair_bytes.len()));
         }
 
         BuildOutcome::Built(WalletWorker::new(
@@ -147,21 +115,27 @@ impl WorkerFactory {
     }
 }
 
-/// Materialize the given keypair bytes as a JSON array to a temp file and return the path.
-/// Used when KEYPAIR_PATH is not set so that wallet_001 can still be spawned as a WalletWorker.
-fn materialize_keypair_to_tmp(keypair_bytes: &[u8], label: &str) -> Option<String> {
-    let path = format!("/tmp/{}.json", label);
-    let json = serde_json::to_string(&keypair_bytes.to_vec()).unwrap_or_default();
-    match std::fs::write(&path, &json) {
-        Ok(_) => {
-            info!(path = %path, "Keypair materialized to temp file (not persisted across restarts)");
-            Some(path)
-        }
-        Err(e) => {
-            warn!("Could not write keypair to temp file '{}': {}", path, e);
-            None
-        }
-    }
+/// Write keypair bytes to a secure temp file.
+/// Uses a nanosecond-nonce suffix, mode 0o600.  Path is not logged.
+fn materialize_keypair(keypair_bytes: &[u8]) -> Option<String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let path = format!("/tmp/.kp{:08x}", nonce);
+    let json = serde_json::to_string(&keypair_bytes.to_vec()).ok()?;
+
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok()?;
+    f.write_all(json.as_bytes()).ok()?;
+    Some(path)
 }
 
 #[tokio::main]
@@ -180,13 +154,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("gRPC port: {}", config.grpc_port);
     info!("Metrics port: {}", config.metrics_port);
     if config.demo_mode {
-        warn!("╔═════════════════════════════════════════════════════════════╗");
-        warn!("║  DEMO MODE — ephemeral keypair generated, trading disabled ║");
-        warn!("║  Set WALLET_PRIVATE_KEY in Replit Secrets to trade live.   ║");
-        warn!("╚═════════════════════════════════════════════════════════════╝");
+        warn!("DEMO MODE — ephemeral keypair, trading disabled; set WALLET_PRIVATE_KEY to enable");
     }
 
-    // ── Prometheus metrics ────────────────────────────────────────────────
     let metrics = Arc::new(Metrics::new().map_err(|e| format!("Metrics error: {}", e))?);
     {
         let m = metrics.clone();
@@ -194,7 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { m.start_server(port).await; });
     }
 
-    // ── Database + config overrides ───────────────────────────────────────
     let db_pool = match DatabasePool::new(&config.database_url).await {
         Ok(pool) => {
             if let Err(e) = database::run_migrations(&pool).await {
@@ -216,7 +185,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // ── RPC manager ───────────────────────────────────────────────────────
     let rpc_manager = Arc::new(
         RpcManager::new(config.rpc_endpoints.clone())
             .await
@@ -226,20 +194,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rpc_manager.start_health_checks();
     info!("RPC manager initialized with {} endpoints", config.rpc_endpoints.len());
 
-    // ── Primary PumpFun client ────────────────────────────────────────────
-    // Owns the env-var / ephemeral keypair; shared with:
-    //   (1) WebSocket monitor (token discovery, broadcast to workers)
-    //   (2) BotService gRPC control-plane (pubkey, portfolio queries)
-    //   (3) Primary OrderManager / execution workers (gRPC order execution shim)
     let primary_pumpfun_client = Arc::new(
         PumpFunClient::new(rpc_manager.clone(), config.keypair_bytes.clone())
             .map_err(|e| format!("PumpFun client error: {}", e))?,
     );
     info!("Primary PumpFun client: wallet={}", primary_pumpfun_client.pubkey());
 
-    // ── Primary MEV + Decision Engine + OrderManager (gRPC shim) ─────────
-    // This order manager exists solely as a backwards-compatibility shim for
-    // BotService::submit_order.  All auto-snipe execution runs inside WalletWorkers.
     let jito_client_opt: Option<Arc<crate::mev::JitoClient>> = config
         .jito_bundle_url
         .as_ref()
@@ -280,24 +240,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.demo_mode,
     ));
 
-    // Primary execution workers — consume the gRPC-path OrderManager queue.
-    // Kept as a minimal control-plane shim for backwards compat with BotService.
+    // gRPC control-plane shim: consumes primary OrderManager queue for BotService::submit_order.
     {
         let sem = Arc::new(tokio::sync::Semaphore::new(config.execution_workers));
         for i in 0..config.execution_workers {
             let manager = order_manager.clone();
             let sem = sem.clone();
             tokio::spawn(async move {
-                info!("Primary execution worker {} started (gRPC control-plane shim)", i);
+                info!("Primary execution worker {} started (gRPC shim)", i);
                 manager.execution_worker(sem).await;
             });
         }
     }
-    info!("Primary order manager + gRPC shim workers initialized");
+    info!("Primary order manager initialized");
 
-    // ── WebSocket token monitor ───────────────────────────────────────────
-    // Single shared instance; broadcasts events to all registry WalletWorkers.
-    // No token consumer on the primary path — auto-snipe is WalletWorker-only.
     {
         let ws_monitor = websocket::WebSocketMonitor::new(
             rpc_manager.clone(),
@@ -311,7 +267,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ── DB cleanup loop ───────────────────────────────────────────────────
     {
         let pool = db_pool.pool.clone();
         tokio::spawn(async move {
@@ -325,7 +280,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ── Global auto_snipe / snipe_amount ─────────────────────────────────
     let auto_snipe = std::env::var("AUTO_SNIPE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
@@ -335,50 +289,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|sol| (sol * 1_000_000_000.0) as u64)
         .unwrap_or(50_000_000);
 
-    // ── Wallet Registry Bootstrap ─────────────────────────────────────────
-    // Invariant: every enabled registry entry MUST have a usable keypair_path so
-    // the orchestrator can spawn a WalletWorker for it.
-    //
-    // If the registry is empty, auto-register wallet_001 with the primary keypair.
-    // Key resolution order:
-    //   (1) KEYPAIR_PATH env var      — file already on disk, use directly
-    //   (2) WALLET_PRIVATE_KEY mode   — materialize bytes to /tmp (not demo)
-    //   (3) Demo mode                 — materialize ephemeral bytes to /tmp
-    //
-    // Materialized paths are volatile (lost on restart) but that is acceptable:
-    // the orchestrator re-materializes on every startup during bootstrap.
+    // Bootstrap: if registry is empty, auto-register wallet_001 with a usable keypair_path.
+    // Resolution: KEYPAIR_PATH env var → materialize bytes to a secure temp file.
     let primary_pubkey = primary_pumpfun_client.pubkey().to_string();
     {
         let all_wallets = database::load_wallet_registry(&db_pool.pool).await;
         if all_wallets.is_empty() {
-            info!("wallet_registry is empty — auto-registering primary wallet as 'wallet_001'");
+            let keypair_path = std::env::var("KEYPAIR_PATH")
+                .ok()
+                .or_else(|| materialize_keypair(&config.keypair_bytes));
 
-            let keypair_path: Option<String> =
-                // (1) explicit file path already on disk
-                std::env::var("KEYPAIR_PATH").ok()
-                .or_else(|| {
-                    // (2/3) materialize bytes to temp file
-                    let label = if config.demo_mode {
-                        "wallet_001_demo"
-                    } else {
-                        "wallet_001_primary"
-                    };
-                    materialize_keypair_to_tmp(&config.keypair_bytes, label)
-                });
-
-            match keypair_path {
-                Some(ref path) => {
-                    info!(
-                        path = %path,
-                        "wallet_001 bootstrap: keypair_path resolved — will spawn WalletWorker"
-                    );
-                }
-                None => {
-                    warn!(
-                        "wallet_001 bootstrap: keypair could not be materialized; \
-                         gRPC execution workers will handle order processing"
-                    );
-                }
+            if keypair_path.is_some() {
+                info!("wallet_registry empty — registering wallet_001 with keypair");
+            } else {
+                warn!("wallet_registry empty — keypair not available; gRPC shim handles orders");
             }
 
             match database::upsert_wallet_registry(
@@ -389,23 +313,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
             {
-                Ok(_) => info!("wallet_registry: wallet_001 registered"),
+                Ok(_) => info!("wallet_001 registered"),
                 Err(e) => warn!("Could not auto-register wallet_001: {}", e),
             }
         } else {
-            info!("wallet_registry: {} registered wallet(s)", all_wallets.len());
-            for w in &all_wallets {
-                info!(
-                    wallet_id = %w.wallet_id,
-                    status = %w.status,
-                    owner_pubkey = ?w.owner_pubkey,
-                    "wallet_registry entry"
-                );
-            }
+            info!("wallet_registry: {} wallet(s)", all_wallets.len());
         }
     }
 
-    // ── WorkerFactory ─────────────────────────────────────────────────────
     let factory = Arc::new(WorkerFactory {
         db_pool: db_pool.clone(),
         rpc_manager: rpc_manager.clone(),
@@ -424,31 +339,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snipe_amount_lamports: snipe_amount,
     });
 
-    // ── Spawn-request channel ─────────────────────────────────────────────
-    // Watcher and backoff-restart tasks send WalletFullEntry values to the
-    // supervisor, which is the SOLE owner of the JoinSet.  No Mutex is ever
-    // held across an async await boundary.
-    let (spawn_tx, spawn_rx) = mpsc::channel::<WalletFullEntry>(128);
+    // Two spawn channels to enforce backoff policy:
+    //   spawn_tx  — watcher + initial load; entries dropped if wallet is in in_backoff.
+    //   restart_tx — backoff timer only; always processed, clears in_backoff for that wallet.
+    let (spawn_tx, mut spawn_rx) = mpsc::channel::<WalletFullEntry>(128);
+    let (restart_tx, mut restart_rx) = mpsc::channel::<WalletFullEntry>(128);
 
-    // ── Supervisor task ───────────────────────────────────────────────────
-    // Owns JoinSet<String>, active_ids, runtime_fail_counts, and
-    // build_fail_counts directly (no Mutex shared with other tasks).
-    //
-    // Failure tracking:
-    //   build_fail_counts  — consecutive build() failures for wallets with a
-    //                        configured keypair_path (or missing path → also fails).
-    //                        After MAX_RESTART_ATTEMPTS: HALT + permanently_skipped.
-    //   runtime_fail_counts — consecutive unexpected WalletWorker exits.
-    //                         Same MAX_RESTART_ATTEMPTS limit + exponential backoff.
     {
         let factory_sup = factory.clone();
         let db_pool_sup = db_pool.clone();
-        let spawn_tx_restart = spawn_tx.clone();
-        let mut spawn_rx = spawn_rx;
 
         tokio::spawn(async move {
             let mut js: JoinSet<String> = JoinSet::new();
             let mut active_ids: HashSet<String> = HashSet::new();
+            let mut in_backoff: HashSet<String> = HashSet::new();
             let mut runtime_fails: HashMap<String, u32> = HashMap::new();
             let mut build_fails: HashMap<String, u32> = HashMap::new();
             let mut permanently_skipped: HashSet<String> = HashSet::new();
@@ -457,99 +361,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             loop {
                 tokio::select! {
-                    // ── Receive a spawn request ──────────────────────────
+                    // Timer-triggered restart: always process; clears in_backoff.
+                    msg = restart_rx.recv() => {
+                        let entry = match msg {
+                            Some(e) => e,
+                            None => { warn!("Restart channel closed"); break; }
+                        };
+                        let wallet_id = entry.wallet_id.clone();
+                        in_backoff.remove(&wallet_id);
+
+                        if active_ids.contains(&wallet_id) || permanently_skipped.contains(&wallet_id) {
+                            continue;
+                        }
+
+                        spawn_entry(
+                            entry,
+                            &factory_sup,
+                            &db_pool_sup,
+                            &mut js,
+                            &mut active_ids,
+                            &mut build_fails,
+                            &mut permanently_skipped,
+                        ).await;
+                    }
+
+                    // Watcher / initial load: skip if backoff pending.
                     msg = spawn_rx.recv() => {
                         let entry = match msg {
                             Some(e) => e,
-                            None => {
-                                warn!("Spawn channel closed — supervisor exiting");
-                                break;
-                            }
+                            None => { warn!("Spawn channel closed"); break; }
                         };
-
                         let wallet_id = entry.wallet_id.clone();
 
-                        // Skip if already running or permanently halted.
                         if active_ids.contains(&wallet_id)
+                            || in_backoff.contains(&wallet_id)
                             || permanently_skipped.contains(&wallet_id)
                         {
                             continue;
                         }
 
-                        match factory_sup.build(entry) {
-                            BuildOutcome::Built(worker) => {
-                                // Reset build failure count on success.
-                                build_fails.remove(&wallet_id);
-
-                                info!(wallet_id = %wallet_id, "Supervisor: spawning WalletWorker");
-                                active_ids.insert(wallet_id.clone());
-
-                                // Wrap in catch_unwind so wallet_id is always returned to
-                                // join_next(), even on panic.
-                                let wid = wallet_id.clone();
-                                js.spawn(async move {
-                                    use futures::FutureExt;
-                                    match std::panic::AssertUnwindSafe(worker.run())
-                                        .catch_unwind()
-                                        .await
-                                    {
-                                        Ok(id) => id,
-                                        Err(_panic) => {
-                                            error!(wallet_id = %wid, "WalletWorker panicked");
-                                            wid
-                                        }
-                                    }
-                                });
-                            }
-
-                            BuildOutcome::Failed(reason) => {
-                                // keypair_path missing or unreadable/invalid.
-                                // Every enabled wallet MUST have usable key material;
-                                // treat as a hard configuration error and halt after
-                                // MAX_RESTART_ATTEMPTS consecutive failures.
-                                let count =
-                                    build_fails.entry(wallet_id.clone()).or_insert(0);
-                                *count += 1;
-                                let attempts = *count;
-
-                                if attempts >= MAX_RESTART_ATTEMPTS {
-                                    error!(
-                                        wallet_id = %wallet_id,
-                                        attempts,
-                                        reason = %reason,
-                                        decision = "HALT",
-                                        "Supervisor: unrecoverable build failure — halting wallet"
-                                    );
-                                    permanently_skipped.insert(wallet_id.clone());
-                                    database::halt_wallet(&db_pool_sup.pool, &wallet_id).await;
-                                } else {
-                                    warn!(
-                                        wallet_id = %wallet_id,
-                                        attempt = attempts,
-                                        max = MAX_RESTART_ATTEMPTS,
-                                        reason = %reason,
-                                        "Supervisor: build failed — will retry on next watcher cycle"
-                                    );
-                                }
-                            }
-                        }
+                        spawn_entry(
+                            entry,
+                            &factory_sup,
+                            &db_pool_sup,
+                            &mut js,
+                            &mut active_ids,
+                            &mut build_fails,
+                            &mut permanently_skipped,
+                        ).await;
                     }
 
-                    // ── Detect WalletWorker runtime exits ─────────────────
                     Some(result) = js.join_next() => {
                         let wallet_id = match result {
                             Ok(id) => id,
-                            Err(e) => {
-                                error!("Supervisor: unexpected JoinError: {:?}", e);
-                                continue;
-                            }
+                            Err(e) => { error!("JoinError: {:?}", e); continue; }
                         };
 
                         active_ids.remove(&wallet_id);
                         warn!(wallet_id = %wallet_id, "Supervisor: WalletWorker exited");
 
-                        let count =
-                            runtime_fails.entry(wallet_id.clone()).or_insert(0);
+                        let count = runtime_fails.entry(wallet_id.clone()).or_insert(0);
                         *count += 1;
                         let attempts = *count;
 
@@ -558,40 +429,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 wallet_id = %wallet_id,
                                 attempts,
                                 decision = "HALT",
-                                "Supervisor: WalletWorker exceeded MAX_RESTART_ATTEMPTS — halting"
+                                "Supervisor: WalletWorker exceeded restart limit"
                             );
                             permanently_skipped.insert(wallet_id.clone());
                             database::halt_wallet(&db_pool_sup.pool, &wallet_id).await;
                         } else {
                             let backoff_secs = 2u64.pow(attempts);
-                            warn!(
-                                wallet_id = %wallet_id,
-                                attempt = attempts,
-                                backoff_secs,
-                                "Supervisor: WalletWorker will restart after exponential backoff"
-                            );
-                            // One-shot backoff timer — actual sleep, not watcher polling.
-                            let tx = spawn_tx_restart.clone();
+                            warn!(wallet_id = %wallet_id, attempt = attempts, backoff_secs, "Supervisor: restarting after backoff");
+                            in_backoff.insert(wallet_id.clone());
+                            let tx = restart_tx.clone();
                             let db = db_pool_sup.clone();
                             let wid = wallet_id.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                                let entries =
-                                    database::load_enabled_wallet_full_entries(&db.pool)
-                                        .await;
-                                if let Some(entry) =
-                                    entries.into_iter().find(|e| e.wallet_id == wid)
-                                {
-                                    info!(
-                                        wallet_id = %wid,
-                                        "Supervisor: backoff elapsed — re-queuing WalletWorker"
-                                    );
+                                let entries = database::load_enabled_wallet_full_entries(&db.pool).await;
+                                if let Some(entry) = entries.into_iter().find(|e| e.wallet_id == wid) {
                                     let _ = tx.send(entry).await;
                                 } else {
-                                    warn!(
-                                        wallet_id = %wid,
-                                        "Supervisor: wallet no longer enabled after backoff"
-                                    );
+                                    warn!(wallet_id = %wid, "Supervisor: wallet no longer enabled after backoff");
                                 }
                             });
                         }
@@ -601,37 +456,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ── Initial load: queue workers for all enabled wallets ───────────────
     {
         let entries = database::load_enabled_wallet_full_entries(&db_pool.pool).await;
         let total = entries.len();
-        let spawnable = entries
-            .iter()
+        let spawnable = entries.iter()
             .filter(|e| e.keypair_path.as_ref().map(|p| !p.is_empty()).unwrap_or(false))
             .count();
-        info!(
-            total,
-            with_keypair_path = spawnable,
-            "Orchestrator: queuing initial wallet workers"
-        );
+        info!(total, with_keypair_path = spawnable, "Orchestrator: queuing initial wallet workers");
         for entry in entries {
             let _ = spawn_tx.send(entry).await;
         }
     }
 
-    // ── Watcher task: polls for newly-enabled wallets every 30s ──────────
-    // Supervisor deduplicates (via active_ids / permanently_skipped).
-    // Restarts with backoff are handled by supervisor's one-shot timers.
     {
         let db_pool_watch = db_pool.clone();
         let tx_watch = spawn_tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
-            interval.tick().await; // skip immediate first tick
+            interval.tick().await;
             loop {
                 interval.tick().await;
-                let entries =
-                    database::load_enabled_wallet_full_entries(&db_pool_watch.pool).await;
+                let entries = database::load_enabled_wallet_full_entries(&db_pool_watch.pool).await;
                 for entry in entries {
                     let _ = tx_watch.send(entry).await;
                 }
@@ -639,7 +484,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ── gRPC server (blocks until shutdown) ───────────────────────────────
     let bot_service = BotService::new(
         order_manager.clone(),
         primary_pumpfun_client.clone(),
@@ -654,9 +498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
+        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Shutdown signal received");
         let _ = shutdown_tx.send(());
     });
@@ -671,4 +513,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("PumpFun Trading Engine stopped");
     Ok(())
+}
+
+async fn spawn_entry(
+    entry: WalletFullEntry,
+    factory: &WorkerFactory,
+    db_pool: &DatabasePool,
+    js: &mut JoinSet<String>,
+    active_ids: &mut HashSet<String>,
+    build_fails: &mut HashMap<String, u32>,
+    permanently_skipped: &mut HashSet<String>,
+) {
+    let wallet_id = entry.wallet_id.clone();
+
+    match factory.build(entry) {
+        BuildOutcome::Built(worker) => {
+            build_fails.remove(&wallet_id);
+            info!(wallet_id = %wallet_id, "Supervisor: spawning WalletWorker");
+            active_ids.insert(wallet_id.clone());
+
+            let wid = wallet_id.clone();
+            js.spawn(async move {
+                use futures::FutureExt;
+                match std::panic::AssertUnwindSafe(worker.run()).catch_unwind().await {
+                    Ok(id) => id,
+                    Err(_) => { error!(wallet_id = %wid, "WalletWorker panicked"); wid }
+                }
+            });
+        }
+
+        BuildOutcome::Failed(reason) => {
+            let count = build_fails.entry(wallet_id.clone()).or_insert(0);
+            *count += 1;
+            let attempts = *count;
+
+            if attempts >= MAX_RESTART_ATTEMPTS {
+                error!(wallet_id = %wallet_id, attempts, reason = %reason, decision = "HALT", "Supervisor: unrecoverable build failure");
+                permanently_skipped.insert(wallet_id.clone());
+                database::halt_wallet(&db_pool.pool, &wallet_id).await;
+            } else {
+                warn!(wallet_id = %wallet_id, attempt = attempts, max = MAX_RESTART_ATTEMPTS, reason = %reason, "Supervisor: build failed");
+            }
+        }
+    }
 }
