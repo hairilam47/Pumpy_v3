@@ -22,6 +22,9 @@ pub struct BotService {
     order_manager: Arc<OrderManager>,
     pumpfun_client: Arc<PumpFunClient>,
     metrics: Arc<Metrics>,
+    /// When true the engine started without a real wallet (ephemeral keypair).
+    /// All trade-execution RPCs are rejected in this mode.
+    demo_mode: bool,
 }
 
 impl BotService {
@@ -29,11 +32,13 @@ impl BotService {
         order_manager: Arc<OrderManager>,
         pumpfun_client: Arc<PumpFunClient>,
         metrics: Arc<Metrics>,
+        demo_mode: bool,
     ) -> Self {
         Self {
             order_manager,
             pumpfun_client,
             metrics,
+            demo_mode,
         }
     }
 }
@@ -44,6 +49,13 @@ impl Bot for BotService {
         &self,
         request: Request<SubmitOrderRequest>,
     ) -> Result<Response<SubmitOrderResponse>, Status> {
+        if self.demo_mode {
+            return Ok(Response::new(SubmitOrderResponse {
+                order_id: String::new(),
+                success: false,
+                message: "Trading disabled — set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading".to_string(),
+            }));
+        }
         let req = request.into_inner();
         info!("SubmitOrder: {} {} {}", req.side, req.token_mint, req.amount);
 
@@ -99,6 +111,12 @@ impl Bot for BotService {
         &self,
         request: Request<CancelOrderRequest>,
     ) -> Result<Response<CancelOrderResponse>, Status> {
+        if self.demo_mode {
+            return Ok(Response::new(CancelOrderResponse {
+                success: false,
+                message: "Trading disabled — set WALLET_PRIVATE_KEY in Replit Secrets to enable live trading".to_string(),
+            }));
+        }
         let order_id = request.into_inner().order_id;
         info!("CancelOrder: {}", order_id);
 

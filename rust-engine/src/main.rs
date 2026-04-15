@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tonic::transport::Server;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod config;
@@ -48,6 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Environment: {}", config.environment);
     info!("gRPC port: {}", config.grpc_port);
     info!("Metrics port: {}", config.metrics_port);
+    if config.demo_mode {
+        warn!("┌─────────────────────────────────────────────────────────────┐");
+        warn!("│  DEMO MODE: no wallet configured — trade execution disabled │");
+        warn!("│  Set WALLET_PRIVATE_KEY in Replit Secrets to enable trading │");
+        warn!("└─────────────────────────────────────────────────────────────┘");
+    }
 
     // Initialize Prometheus metrics
     let metrics = Arc::new(Metrics::new().map_err(|e| format!("Metrics error: {}", e))?);
@@ -221,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         order_manager.clone(),
         pumpfun_client.clone(),
         metrics.clone(),
+        config.demo_mode,
     );
 
     let grpc_addr = format!("0.0.0.0:{}", config.grpc_port)

@@ -1,5 +1,6 @@
 use std::env;
 use serde_json;
+use solana_sdk::signer::keypair::Keypair;
 
 fn provider_name(url: &str) -> String {
     if url.contains("helius") { "helius".to_string() }
@@ -16,6 +17,9 @@ pub struct Config {
     pub grpc_port: u16,
     pub metrics_port: u16,
     pub keypair_bytes: Vec<u8>,
+    /// `true` when no real wallet is configured and an ephemeral keypair was
+    /// generated automatically. Trade execution RPCs are disabled in this mode.
+    pub demo_mode: bool,
     pub rpc_endpoints: Vec<RpcEndpointConfig>,
     pub jito_bundle_url: Option<String>,
     pub execution_workers: usize,
@@ -201,12 +205,37 @@ impl Config {
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| "DATABASE_URL is required but not set")?;
 
-        // Resolve keypair bytes from WALLET_PRIVATE_KEY (base58 or JSON array) OR KEYPAIR_PATH file
-        let keypair_bytes = load_keypair_bytes()?;
+        let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
+
+        // Resolve keypair bytes from WALLET_PRIVATE_KEY (base58 or JSON array) OR KEYPAIR_PATH file.
+        // In non-production environments, fall back to an ephemeral keypair (demo mode) so the
+        // gRPC server and monitoring stack can start without a real wallet configured.
+        let (keypair_bytes, demo_mode) = match load_keypair_bytes() {
+            Ok(bytes) => (bytes, false),
+            Err(err) if environment != "production" => {
+                let ephemeral = Keypair::new();
+                tracing::warn!(
+                    "╔══════════════════════════════════════════════════════════════╗"
+                );
+                tracing::warn!(
+                    "║  DEMO MODE — ephemeral keypair generated, trading disabled  ║"
+                );
+                tracing::warn!(
+                    "║  Set WALLET_PRIVATE_KEY in Replit Secrets to trade live.    ║"
+                );
+                tracing::warn!(
+                    "╚══════════════════════════════════════════════════════════════╝"
+                );
+                tracing::warn!("Wallet config error (ignored in dev): {}", err);
+                (ephemeral.to_bytes().to_vec(), true)
+            }
+            Err(err) => return Err(err),
+        };
 
         Ok(Self {
-            environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
+            environment,
             database_url,
+            demo_mode,
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
             grpc_port: env::var("GRPC_PORT")
