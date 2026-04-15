@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import structlog
@@ -199,13 +199,22 @@ class PresetUpdate(BaseModel):
 
 
 @router.put("/strategy/preset")
-async def set_strategy_preset(body: PresetUpdate, engine=Depends(get_engine)):
+async def set_strategy_preset(
+    body: PresetUpdate,
+    engine=Depends(get_engine),
+    x_admin_key: Optional[str] = Header(default=None),
+):
     """
     Set the strategy risk preset for a wallet.
     Writes the preset to wallet_config via the Express API and applies
     preset parameters to all active strategies immediately.
     Allowed values: conservative | balanced | aggressive.
     """
+    # Require the same admin key that guards Express mutation routes.
+    server_admin_key = os.environ.get("ADMIN_API_KEY", "")
+    if not server_admin_key or x_admin_key != server_admin_key:
+        raise HTTPException(status_code=401, detail="Admin key required")
+
     if body.preset not in PRESETS:
         raise HTTPException(
             status_code=400,
@@ -217,7 +226,7 @@ async def set_strategy_preset(body: PresetUpdate, engine=Depends(get_engine)):
     # Persist to wallet_config via Express API. Fail loudly if the write does
     # not succeed so callers cannot assume the preset is stored when it isn't.
     api_base = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
-    admin_key = os.environ.get("ADMIN_API_KEY", "")
+    admin_key = server_admin_key
     try:
         async with aiohttp.ClientSession() as session:
             async with session.put(
