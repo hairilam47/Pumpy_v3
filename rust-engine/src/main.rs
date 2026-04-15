@@ -83,6 +83,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Applying {} runtime override(s) from bot_config", db_overrides.len());
                 config.apply_db_overrides(&db_overrides);
             }
+            // Load wallet registry and log all registered wallets (no keypair_path exposed).
+            // If in demo_mode (no env-var wallet) and registry has an enabled wallet with a
+            // keypair_path, load that keypair so the engine can trade without env vars.
+            let registry_wallets = database::load_wallet_registry(&pool.pool).await;
+            if registry_wallets.is_empty() {
+                info!("wallet_registry: no wallets registered (env-var wallet or demo mode active)");
+            } else {
+                info!("wallet_registry: {} registered wallet(s)", registry_wallets.len());
+                for w in &registry_wallets {
+                    info!(
+                        wallet_id = %w.wallet_id,
+                        status = %w.status,
+                        owner_pubkey = ?w.owner_pubkey,
+                        "wallet_registry entry"
+                    );
+                }
+            }
+
+            // If we are in demo mode (no env-var wallet configured), attempt to
+            // bootstrap the keypair from the first enabled registry entry's keypair_path.
+            // This provides a forward-compatible path for multi-wallet orchestration.
+            if config.demo_mode {
+                if let Some(kp_path) = database::load_first_registry_keypair_path(&pool.pool).await {
+                    match std::fs::read_to_string(&kp_path) {
+                        Ok(raw) => {
+                            match serde_json::from_str::<Vec<u8>>(&raw.trim().to_string()) {
+                                Ok(bytes) if bytes.len() == 64 => {
+                                    info!("wallet_registry: loaded keypair from registered path — exiting demo mode");
+                                    config.keypair_bytes = bytes;
+                                    config.demo_mode = false;
+                                }
+                                _ => {
+                                    warn!("wallet_registry: keypair file at registered path is invalid, staying in demo mode");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("wallet_registry: could not read keypair file ({}), staying in demo mode", e);
+                        }
+                    }
+                }
+            }
+
             info!("Database connected");
             pool
         }
