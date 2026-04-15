@@ -242,6 +242,112 @@ pub async fn load_first_registry_keypair_path(pool: &DbPool) -> Option<String> {
     }
 }
 
+/// Full wallet entry used by the multi-wallet orchestrator.
+/// Contains keypair_path — MUST NOT be exposed to any API or log boundary.
+#[derive(sqlx::FromRow, Debug, Clone)]
+pub struct WalletFullEntry {
+    pub wallet_id: String,
+    pub keypair_path: Option<String>,
+    pub registry_status: String,
+    pub owner_pubkey: Option<String>,
+    pub risk_per_trade_sol: f64,
+    pub daily_loss_limit_sol: f64,
+    pub strategy_preset: String,
+}
+
+/// Load all enabled wallets from wallet_registry LEFT JOIN wallet_config.
+/// Falls back to wallet_config defaults (0.1 SOL risk, 1.0 SOL daily limit, 'balanced')
+/// for wallets that have no wallet_config row yet.
+/// INTERNAL USE ONLY — keypair_path is included and must not leave the orchestrator.
+pub async fn load_enabled_wallet_full_entries(pool: &DbPool) -> Vec<WalletFullEntry> {
+    match sqlx::query_as::<_, WalletFullEntry>(
+        r#"
+        SELECT
+            wr.wallet_id,
+            wr.keypair_path,
+            wr.status AS registry_status,
+            wr.owner_pubkey,
+            COALESCE(wc.risk_per_trade_sol, 0.1)     AS risk_per_trade_sol,
+            COALESCE(wc.daily_loss_limit_sol, 1.0)   AS daily_loss_limit_sol,
+            COALESCE(wc.strategy_preset, 'balanced') AS strategy_preset
+        FROM wallet_registry wr
+        LEFT JOIN wallet_config wc ON wc.wallet_id = wr.wallet_id
+        WHERE wr.status = 'enabled'
+        ORDER BY wr.created_at
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("Could not load enabled wallets from registry: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Mark a wallet as halted in both wallet_registry and wallet_config.
+/// Idempotent — safe to call if already halted.
+/// Errors are logged but not returned — this is used in failure-recovery paths.
+pub async fn halt_wallet(pool: &DbPool, wallet_id: &str) {
+    if let Err(e) = sqlx::query(
+        "UPDATE wallet_registry SET status = 'halted' WHERE wallet_id = $1"
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(wallet_id = %wallet_id, "Failed to halt wallet in wallet_registry: {}", e);
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE wallet_config SET status = 'halted', updated_at = NOW() WHERE wallet_id = $1"
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(wallet_id = %wallet_id, "Failed to halt wallet in wallet_config: {}", e);
+    }
+}
+
+/// Insert or update a wallet in the registry (upsert).
+/// Used by the backwards-compatibility path when wallet_registry is empty but
+/// an env-var keypair is present — auto-creates a 'wallet_001' row.
+pub async fn upsert_wallet_registry(
+    pool: &DbPool,
+    wallet_id: &str,
+    keypair_path: Option<&str>,
+    owner_pubkey: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO wallet_registry (wallet_id, keypair_path, status, owner_pubkey, created_at)
+        VALUES ($1, $2, 'enabled', $3, NOW())
+        ON CONFLICT (wallet_id) DO NOTHING
+        "#,
+    )
+    .bind(wallet_id)
+    .bind(keypair_path)
+    .bind(owner_pubkey)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO wallet_config (wallet_id, risk_per_trade_sol, daily_loss_limit_sol, strategy_preset, status, created_at, updated_at)
+        VALUES ($1, 0.1, 1.0, 'balanced', 'enabled', NOW(), NOW())
+        ON CONFLICT (wallet_id) DO NOTHING
+        "#,
+    )
+    .bind(wallet_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn cleanup_old_data(db: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days' AND status IN ('Executed', 'Failed', 'Cancelled', 'Expired')"
