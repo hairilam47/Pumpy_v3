@@ -210,10 +210,11 @@ router.get("/strategy/preset", (_req, res) => {
   res.json(PRESET_PARAMS);
 });
 
-// ─── POST /api/wallets/:id/pause — no admin key required ─────────────────────
-// Pause is a user-initiated safety action; no secret required in the dashboard.
+// ─── POST /api/wallets/:id/pause — admin-gated ───────────────────────────────
+// Pausing halts live order execution; admin key is required to prevent
+// unauthenticated callers from triggering an operational DoS on the wallet.
 
-router.post("/wallets/:id/pause", async (req, res) => {
+router.post("/wallets/:id/pause", requireAdminKey, async (req, res) => {
   const { id } = req.params;
   try {
     await db.transaction(async (tx) => {

@@ -343,10 +343,11 @@ pub async fn load_enabled_wallet_full_entries(pool: &DbPool) -> Vec<WalletFullEn
     }
 }
 
-/// Mark a wallet as halted in both wallet_registry and wallet_config.
-/// Idempotent — safe to call if already halted.
-/// Errors are logged but not returned — this is used in failure-recovery paths.
-pub async fn pause_wallet(pool: &DbPool, wallet_id: &str, reason: &str) {
+/// Persist an auto-pause event. `reject_count` is the exact number of
+/// consecutive REJECT decisions that triggered the pause, stored verbatim in
+/// `wallet_alerts.count` so callers can see the full rejection progression.
+/// Errors are logged but not propagated — used in recovery paths.
+pub async fn pause_wallet(pool: &DbPool, wallet_id: &str, reason: &str, reject_count: u32) {
     if let Err(e) = sqlx::query(
         "UPDATE wallet_registry SET status = 'paused' WHERE wallet_id = $1"
     )
@@ -367,15 +368,19 @@ pub async fn pause_wallet(pool: &DbPool, wallet_id: &str, reason: &str) {
         tracing::error!(wallet_id = %wallet_id, "Failed to pause wallet in wallet_config: {}", e);
     }
 
+    // Store the actual consecutive-reject count that triggered this pause so the
+    // dashboard can show operators the full rejection progression, not just a
+    // monotonically incrementing event counter.
     if let Err(e) = sqlx::query(
         r#"
         INSERT INTO wallet_alerts (wallet_id, error_type, count, last_at, auto_paused_at)
-        VALUES ($1, 'consecutive_reject', 1, NOW(), NOW())
+        VALUES ($1, 'consecutive_reject', $2, NOW(), NOW())
         ON CONFLICT (wallet_id, error_type)
-        DO UPDATE SET count = wallet_alerts.count + 1, last_at = NOW(), auto_paused_at = NOW()
+        DO UPDATE SET count = $2, last_at = NOW(), auto_paused_at = NOW()
         "#
     )
     .bind(wallet_id)
+    .bind(reject_count as i32)
     .execute(pool)
     .await
     {
@@ -385,6 +390,7 @@ pub async fn pause_wallet(pool: &DbPool, wallet_id: &str, reason: &str) {
     tracing::error!(
         wallet_id = %wallet_id,
         reason = reason,
+        reject_count = reject_count,
         decision = "HALT",
         "Wallet auto-paused and persisted to DB"
     );

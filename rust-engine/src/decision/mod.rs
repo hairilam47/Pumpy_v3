@@ -97,6 +97,12 @@ impl DecisionEngine {
         self.auto_paused.load(Ordering::Acquire)
     }
 
+    /// Returns the current consecutive-reject count. Used when persisting
+    /// auto-pause events so wallet_alerts.count records the real accumulation.
+    pub fn consecutive_rejects_count(&self) -> u32 {
+        self.consecutive_rejects.load(Ordering::Acquire)
+    }
+
     /// Reset all auto-pause state. Call when an operator manually resumes a wallet.
     /// Clears the consecutive-reject counter, lifts the auto_paused latch, and
     /// discards any pending needs_db_pause flag so the next order can be evaluated

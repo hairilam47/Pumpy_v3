@@ -214,6 +214,8 @@ async def set_strategy_preset(body: PresetUpdate, engine=Depends(get_engine)):
 
     params = PRESETS[body.preset]
 
+    # Persist to wallet_config via Express API. Fail loudly if the write does
+    # not succeed so callers cannot assume the preset is stored when it isn't.
     api_base = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
     admin_key = os.environ.get("ADMIN_API_KEY", "")
     try:
@@ -224,11 +226,21 @@ async def set_strategy_preset(body: PresetUpdate, engine=Depends(get_engine)):
                 headers={"X-Admin-Key": admin_key, "Content-Type": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
-                if resp.status not in (200, 404):
+                if resp.status not in (200, 201, 204):
                     text = await resp.text()
-                    logger.warning("Failed to persist preset to wallet_config", status=resp.status, body=text)
+                    logger.error("Failed to persist preset to wallet_config", status=resp.status, body=text)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Failed to persist preset to wallet_config (status {resp.status}): {text[:200]}",
+                    )
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("Could not persist preset to Express API", error=str(exc))
+        logger.error("Could not reach Express API for preset persistence", error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not persist preset — Express API unreachable: {exc}",
+        )
 
     for strategy in engine.strategies:
         if hasattr(strategy, "buy_amount_sol"):

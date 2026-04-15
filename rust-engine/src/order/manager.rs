@@ -196,8 +196,9 @@ impl OrderManager {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded".to_string(),
             };
+            let reject_count = self.decision_engine.consecutive_rejects_count();
             tokio::spawn(async move {
-                database::pause_wallet(&pool, &wid, &halt_reason).await;
+                database::pause_wallet(&pool, &wid, &halt_reason, reject_count).await;
             });
         }
 
@@ -339,8 +340,9 @@ impl OrderManager {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
             };
+            let reject_count = self.decision_engine.consecutive_rejects_count();
             tokio::spawn(async move {
-                database::pause_wallet(&pool, &wid, &halt_reason).await;
+                database::pause_wallet(&pool, &wid, &halt_reason, reject_count).await;
             });
         }
 
@@ -771,8 +773,9 @@ impl OrderManagerMinimal {
                 Decision::Halt { reason } => reason.clone(),
                 _ => "consecutive_reject threshold exceeded (execution gate)".to_string(),
             };
+            let reject_count = self.decision_engine.consecutive_rejects_count();
             tokio::spawn(async move {
-                database::pause_wallet(&pool, &wid, &halt_reason).await;
+                database::pause_wallet(&pool, &wid, &halt_reason, reject_count).await;
             });
         }
 
