@@ -4,9 +4,9 @@ import grpc
 import warnings
 
 try:
-    from grpc_client import bot_pb2 as bot__pb2
+    from . import bot_pb2 as bot__pb2
 except ImportError:
-    from . import bot_pb2 as bot__pb2  # type: ignore[no-redef]
+    from grpc_client import bot_pb2 as bot__pb2  # type: ignore[no-redef]
 
 GRPC_GENERATED_VERSION = '1.66.1'
 GRPC_VERSION = grpc.__version__

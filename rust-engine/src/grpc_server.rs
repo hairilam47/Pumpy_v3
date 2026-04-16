@@ -21,7 +21,7 @@ use bot_proto::bot_server::Bot;
 use bot_proto::*;
 
 // ── Idempotency cache (Task #26) ──────────────────────────────────────────────
-const IKEY_TTL_SECS: u64 = 300; // 5 minutes
+const IKEY_TTL_SECS: u64 = 60; // 60-second dedup window
 
 struct IdempotencyEntry {
     order_id: String,
@@ -79,42 +79,33 @@ impl Bot for BotService {
 
         // Distributed tracing (Task #31)
         let trace_id = if req.trace_id.is_empty() { "no-trace".to_string() } else { req.trace_id.clone() };
-        let client_order_id = req.client_order_id.clone();
         let ikey = req.idempotency_key.clone();
+
+        // Parse and validate the client_order_id UUID before doing anything else.
+        // Returns invalid_argument immediately if the caller sent a malformed UUID.
+        let client_order_id: Option<uuid::Uuid> = if req.client_order_id.is_empty() {
+            None
+        } else {
+            Some(uuid::Uuid::parse_str(&req.client_order_id).map_err(|_| {
+                Status::invalid_argument(format!(
+                    "client_order_id is not a valid UUID: {}",
+                    req.client_order_id
+                ))
+            })?)
+        };
 
         info!(
             trace_id = %trace_id,
-            client_order_id = %client_order_id,
+            client_order_id = ?client_order_id,
             side = %req.side,
             mint = %req.token_mint,
             amount = req.amount,
             "SubmitOrder received"
         );
 
-        // Idempotency check (Task #26) — deduplicate within 5-minute TTL
-        if !ikey.is_empty() {
-            // Evict stale entries
-            {
-                let mut cache = self.ikey_cache.write().await;
-                cache.retain(|_, v| v.recorded_at.elapsed() < Duration::from_secs(IKEY_TTL_SECS));
-            }
-
-            let cache = self.ikey_cache.read().await;
-            if let Some(entry) = cache.get(&ikey) {
-                warn!(
-                    idempotency_key = %ikey,
-                    existing_order_id = %entry.order_id,
-                    trace_id = %trace_id,
-                    "Duplicate request detected — returning existing order_id"
-                );
-                return Ok(Response::new(SubmitOrderResponse {
-                    order_id: entry.order_id.clone(),
-                    success: true,
-                    message: "Duplicate: returning existing order".to_string(),
-                }));
-            }
-        }
-
+        // Validate request fields BEFORE touching the idempotency cache.
+        // This prevents cache poisoning where an invalid request reserves a key and
+        // blocks valid retries for the TTL window.
         let order_type = OrderType::from_str(&req.order_type).map_err(|e| {
             Status::invalid_argument(format!("Invalid order type: {}", e))
         })?;
@@ -122,6 +113,57 @@ impl Bot for BotService {
         let side = OrderSide::from_str(&req.side).map_err(|e| {
             Status::invalid_argument(format!("Invalid order side: {}", e))
         })?;
+
+        // Idempotency check (Task #26) — atomic check+reserve under single write lock.
+        // Using a single write lock for both the check and the reservation prevents
+        // the TOCTOU race where two concurrent retries both pass the read-check before
+        // either inserts, which would cause duplicate execution.
+        if !ikey.is_empty() {
+            let mut cache = self.ikey_cache.write().await;
+            // Evict stale entries while we hold the write lock.
+            cache.retain(|_, v| v.recorded_at.elapsed() < Duration::from_secs(IKEY_TTL_SECS));
+
+            match cache.get(&ikey) {
+                Some(entry) if !entry.order_id.is_empty() => {
+                    // Key seen before and order completed — return cached success response.
+                    warn!(
+                        idempotency_key = %ikey,
+                        existing_order_id = %entry.order_id,
+                        trace_id = %trace_id,
+                        "Duplicate request detected — returning existing order_id"
+                    );
+                    return Ok(Response::new(SubmitOrderResponse {
+                        order_id: entry.order_id.clone(),
+                        success: true,
+                        message: "Duplicate: returning existing order".to_string(),
+                    }));
+                }
+                Some(_) => {
+                    // Key is reserved but order is still in flight — concurrent duplicate.
+                    // Return success acknowledgement; the caller should treat this as if the
+                    // order was accepted (it was — the first copy is executing).
+                    warn!(
+                        idempotency_key = %ikey,
+                        trace_id = %trace_id,
+                        "Concurrent duplicate request in flight — acknowledging without re-execution"
+                    );
+                    return Ok(Response::new(SubmitOrderResponse {
+                        order_id: String::new(),
+                        success: true,
+                        message: "Duplicate request acknowledged — order is being processed".to_string(),
+                    }));
+                }
+                None => {
+                    // First time we see this key: reserve it with an empty placeholder.
+                    // Any concurrent duplicate will hit the Some(_) branch above.
+                    cache.insert(ikey.clone(), IdempotencyEntry {
+                        order_id: String::new(), // in-flight marker
+                        recorded_at: Instant::now(),
+                    });
+                }
+            }
+            // Write lock is dropped here before the (potentially slow) order submission.
+        }
 
         let order = Order {
             id: String::new(),
@@ -144,17 +186,17 @@ impl Bot for BotService {
             retry_count: 0,
             executed_price: None,
             executed_amount: None,
+            client_order_id,
         };
 
         match self.order_manager.submit_order(order).await {
             Ok(order_id) => {
-                // Store idempotency entry
+                // Commit the reservation: update in-flight marker with real order_id.
                 if !ikey.is_empty() {
                     let mut cache = self.ikey_cache.write().await;
-                    cache.insert(ikey.clone(), IdempotencyEntry {
-                        order_id: order_id.clone(),
-                        recorded_at: Instant::now(),
-                    });
+                    if let Some(entry) = cache.get_mut(&ikey) {
+                        entry.order_id = order_id.clone();
+                    }
                 }
                 info!(
                     trace_id = %trace_id,
@@ -168,6 +210,11 @@ impl Bot for BotService {
                 }))
             }
             Err(e) => {
+                // Release the reservation so retries can go through.
+                if !ikey.is_empty() {
+                    let mut cache = self.ikey_cache.write().await;
+                    cache.remove(&ikey);
+                }
                 error!(trace_id = %trace_id, error = %e, "Failed to submit order");
                 Ok(Response::new(SubmitOrderResponse {
                     order_id: String::new(),

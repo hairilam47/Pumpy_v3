@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import time
+import uuid
 from typing import Dict, List, Optional
 import structlog
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
@@ -263,6 +264,7 @@ class StrategyEngine:
                     logger.error("Strategy error", strategy=strategy.name, error=str(e))
 
     async def _execute_signal(self, signal: TradeSignal):
+        client_order_id = str(uuid.uuid4())
         logger.info(
             "Executing signal",
             strategy=signal.strategy_name,
@@ -271,6 +273,7 @@ class StrategyEngine:
             amount_sol=signal.amount_sol,
             confidence=signal.confidence,
             reason=signal.reason,
+            client_order_id=client_order_id,
         )
 
         amount_lamports = int(signal.amount_sol * 1_000_000_000)
@@ -283,6 +286,7 @@ class StrategyEngine:
             slippage_bps=signal.slippage_bps,
             strategy_name=signal.strategy_name,
             metadata=signal.metadata,
+            client_order_id=client_order_id,
         )
 
         if result.get("success"):
@@ -291,6 +295,7 @@ class StrategyEngine:
             logger.info(
                 "Order submitted",
                 order_id=result.get("order_id"),
+                client_order_id=client_order_id,
                 strategy=signal.strategy_name,
             )
         else:
@@ -299,6 +304,7 @@ class StrategyEngine:
             logger.warning(
                 "Order submission failed",
                 reason=result.get("message"),
+                client_order_id=client_order_id,
                 strategy=signal.strategy_name,
             )
 

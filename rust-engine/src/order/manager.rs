@@ -737,8 +737,8 @@ impl OrderManager {
             INSERT INTO orders (
                 id, mint, order_type, side, amount, price, max_cost, min_output,
                 slippage_bps, status, strategy, metadata, created_at, updated_at,
-                executed_at, signature, error, retry_count
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                executed_at, signature, error, retry_count, client_order_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -760,6 +760,7 @@ impl OrderManager {
         .bind(&order.signature)
         .bind(&order.error)
         .bind(order.retry_count as i32)
+        .bind(&order.client_order_id)
         .execute(&self.db_pool.pool)
         .await?;
         Ok(())
@@ -880,6 +881,7 @@ impl OrderManager {
                             executed_price: None,
                             executed_amount: None,
                             metadata: std::collections::HashMap::new(),
+                            client_order_id: Some(uuid::Uuid::new_v4()),
                         };
                         match self.submit_order(order).await {
                             Ok(id) => info!("Sniper order {} queued for new token: {}", id, event.mint),

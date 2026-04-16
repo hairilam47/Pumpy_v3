@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
+use uuid::Uuid;
 
 pub use manager::OrderManager;
 
@@ -30,6 +31,8 @@ pub struct Order {
     pub retry_count: u32,
     pub executed_price: Option<f64>,
     pub executed_amount: Option<u64>,
+    /// Stable client-assigned UUID for idempotency tracking (Task #26)
+    pub client_order_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

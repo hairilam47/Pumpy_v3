@@ -1,4 +1,4 @@
-import { pgTable, text, doublePrecision, timestamp, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, text, uuid, doublePrecision, timestamp, integer, index } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 export const tradesTable = pgTable("trades", {
@@ -17,7 +17,7 @@ export const tradesTable = pgTable("trades", {
   slippageBps: integer("slippage_bps").default(100),
   createdAt: timestamp("created_at").defaultNow(),
   executedAt: timestamp("executed_at"),
-  clientOrderId: text("client_order_id"),
+  clientOrderId: uuid("client_order_id"),
   traceId: text("trace_id"),
 }, (table) => [
   index("trades_wallet_id_created_at_idx").on(table.walletId, table.createdAt),

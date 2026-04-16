@@ -44,9 +44,23 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
             executed_at TIMESTAMPTZ,
             signature TEXT,
             error TEXT,
-            retry_count INTEGER NOT NULL DEFAULT 0
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            client_order_id UUID
         )
         "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
+    // Idempotency: add client_order_id to existing orders tables (Task #26)
+    sqlx::query(
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_order_id UUID"
+    )
+    .execute(&db.pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS orders_client_order_id_idx ON orders (client_order_id) WHERE client_order_id IS NOT NULL"
     )
     .execute(&db.pool)
     .await?;
@@ -81,9 +95,23 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
             pnl DOUBLE PRECISION,
             signature TEXT,
             strategy TEXT NOT NULL DEFAULT '',
-            executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            client_order_id UUID
         )
         "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
+    // Idempotency: add client_order_id to existing trades tables (Task #26)
+    sqlx::query(
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_order_id UUID"
+    )
+    .execute(&db.pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS trades_client_order_id_idx ON trades (client_order_id) WHERE client_order_id IS NOT NULL"
     )
     .execute(&db.pool)
     .await?;
