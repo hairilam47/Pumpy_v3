@@ -8,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import { useAdminKey } from "@/hooks/use-admin-key";
+import { useAdminKey, getValidAdminKey } from "@/hooks/use-admin-key";
 
 interface WalletEntry {
   walletId: string;
@@ -167,8 +167,9 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   key={preset.id}
                   onClick={() => {
                     if (!isActive && !pendingPreset) {
-                      if (adminKey) {
-                        changePreset.mutate({ preset: preset.id, key: adminKey });
+                      const key = getValidAdminKey();
+                      if (key) {
+                        changePreset.mutate({ preset: preset.id, key });
                       } else {
                         setPendingPreset(preset.id);
                       }

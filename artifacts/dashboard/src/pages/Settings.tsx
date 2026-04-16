@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { useAdminKey } from "@/hooks/use-admin-key";
+import { useAdminKey, getValidAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
 
 interface EnvVar {
@@ -375,8 +375,9 @@ function StrategyPresetCard() {
                 key={p.id}
                 onClick={() => {
                   if (!isActive && !pendingPreset) {
-                    if (adminKey) {
-                      savePreset.mutate({ preset: p.id, key: adminKey });
+                    const key = getValidAdminKey();
+                    if (key) {
+                      savePreset.mutate({ preset: p.id, key });
                     } else {
                       setPendingPreset(p.id);
                     }

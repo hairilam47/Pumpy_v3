@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { useAdminKey } from "@/hooks/use-admin-key";
+import { useAdminKey, getValidAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
 
 interface WalletEntry {
@@ -194,8 +194,9 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
                   variant="outline"
                   className="shrink-0 text-xs h-7 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
                   onClick={() => {
-                    if (adminKey) {
-                      resumeMutation.mutate(adminKey);
+                    const key = getValidAdminKey();
+                    if (key) {
+                      resumeMutation.mutate(key);
                     } else {
                       setShowKeyPrompt(true);
                     }
