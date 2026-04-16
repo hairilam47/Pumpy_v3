@@ -339,6 +339,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Background cleanup for persistent idempotency keys (Task #41).
+    // Runs every 30 seconds to purge rows older than 60 seconds, keeping the
+    // table small even under sustained load.
+    {
+        let pool = db_pool.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                database::cleanup_idempotency_keys(&pool).await;
+            }
+        });
+    }
+
     let auto_snipe = std::env::var("AUTO_SNIPE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
@@ -557,6 +571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         primary_pumpfun_client.clone(),
         metrics.clone(),
         config.demo_mode,
+        db_pool.pool.clone(),
     );
 
     let grpc_addr = format!("0.0.0.0:{}", config.grpc_port)

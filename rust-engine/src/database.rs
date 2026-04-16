@@ -210,6 +210,26 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
     .execute(&db.pool)
     .await?;
 
+    // Persistent idempotency keys (Task #41)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            ikey       TEXT PRIMARY KEY,
+            order_id   TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&db.pool)
+    .await?;
+
+    // Index for fast TTL cleanup by age.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idempotency_keys_created_at_idx ON idempotency_keys (created_at)"
+    )
+    .execute(&db.pool)
+    .await?;
+
     // Seed Jito tip and simulation defaults into bot_config so operators can
     // read/write them immediately via the dashboard without restarting the engine.
     for (key, value, _description) in &[
@@ -542,4 +562,80 @@ pub async fn cleanup_old_data(db: &DbPool) -> Result<(), sqlx::Error> {
     .await?;
 
     Ok(())
+}
+
+// ── Persistent idempotency keys (Task #41) ────────────────────────────────────
+
+#[derive(sqlx::FromRow, Debug)]
+pub struct IdempotencyKeyRow {
+    pub ikey: String,
+    /// Empty string means "in-flight" (reserved but order not yet completed).
+    pub order_id: String,
+}
+
+/// Look up a persisted idempotency key.
+/// Returns None if the key has never been seen or has already been cleaned up.
+pub async fn check_idempotency_key(pool: &DbPool, key: &str) -> Option<IdempotencyKeyRow> {
+    sqlx::query_as::<_, IdempotencyKeyRow>(
+        "SELECT ikey, order_id FROM idempotency_keys WHERE ikey = $1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Atomically reserve a key in the DB (INSERT … ON CONFLICT DO NOTHING).
+/// Returns `true` if this caller owns the reservation, `false` if another
+/// process already holds it (concurrent duplicate after a restart).
+pub async fn reserve_idempotency_key(pool: &DbPool, key: &str) -> bool {
+    sqlx::query(
+        "INSERT INTO idempotency_keys (ikey, order_id, created_at) \
+         VALUES ($1, '', NOW()) \
+         ON CONFLICT (ikey) DO NOTHING",
+    )
+    .bind(key)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() == 1)
+    .unwrap_or(false)
+}
+
+/// Record the completed order_id for a key so crash-recovery retries return it.
+pub async fn commit_idempotency_key(pool: &DbPool, key: &str, order_id: &str) {
+    if let Err(e) = sqlx::query(
+        "UPDATE idempotency_keys SET order_id = $2 WHERE ikey = $1",
+    )
+    .bind(key)
+    .bind(order_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(ikey = %key, "Failed to commit idempotency key: {}", e);
+    }
+}
+
+/// Release a reserved key so the caller can retry (used when order execution fails).
+pub async fn release_idempotency_key(pool: &DbPool, key: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM idempotency_keys WHERE ikey = $1")
+        .bind(key)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(ikey = %key, "Failed to release idempotency key: {}", e);
+    }
+}
+
+/// TTL cleanup: remove keys older than 60 seconds (matching the in-memory TTL).
+/// Called by the background cleanup task so the table stays small.
+pub async fn cleanup_idempotency_keys(pool: &DbPool) {
+    if let Err(e) = sqlx::query(
+        "DELETE FROM idempotency_keys WHERE created_at < NOW() - INTERVAL '60 seconds'",
+    )
+    .execute(pool)
+    .await
+    {
+        tracing::warn!("Failed to clean up idempotency_keys: {}", e);
+    }
 }

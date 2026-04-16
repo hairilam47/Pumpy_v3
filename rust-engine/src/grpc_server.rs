@@ -8,6 +8,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use tracing::{info, warn, error};
 
+use crate::database::{self, DbPool};
 use crate::metrics::Metrics;
 use crate::order::{Order, OrderManager, OrderSide, OrderStatus, OrderType};
 use crate::pumpfun::PumpFunClient;
@@ -45,6 +46,9 @@ pub struct BotService {
     /// All trade-execution RPCs are rejected in this mode.
     demo_mode: bool,
     ikey_cache: IdempotencyCache,
+    /// Database pool for durable idempotency key persistence (Task #41).
+    /// Used as crash-safe fallback when the in-memory cache misses.
+    db_pool: DbPool,
 }
 
 impl BotService {
@@ -53,6 +57,7 @@ impl BotService {
         pumpfun_client: Arc<PumpFunClient>,
         metrics: Arc<Metrics>,
         demo_mode: bool,
+        db_pool: DbPool,
     ) -> Self {
         Self {
             order_manager,
@@ -60,6 +65,7 @@ impl BotService {
             metrics,
             demo_mode,
             ikey_cache: make_ikey_cache(),
+            db_pool,
         }
     }
 }
@@ -114,38 +120,92 @@ impl Bot for BotService {
             Status::invalid_argument(format!("Invalid order side: {}", e))
         })?;
 
-        // Idempotency check (Task #26) — atomic check+reserve under single write lock.
-        // Using a single write lock for both the check and the reservation prevents
-        // the TOCTOU race where two concurrent retries both pass the read-check before
-        // either inserts, which would cause duplicate execution.
+        // ── Two-tier idempotency (Task #26 + Task #41) ──────────────────────────
+        //
+        // Tier 1 — in-memory cache (fast path, same-process dedup):
+        //   Atomic check-and-reserve under a single write lock prevents TOCTOU for
+        //   concurrent duplicates within the same process.
+        //
+        // Tier 2 — DB fallback (crash-safe, cross-restart dedup):
+        //   When the in-memory cache misses (e.g. after a restart), we check the DB
+        //   before reserving.  The DB INSERT is atomic (ON CONFLICT DO NOTHING) so
+        //   two racing processes after a restart are handled safely.
         if !ikey.is_empty() {
-            let mut cache = self.ikey_cache.write().await;
-            // Evict stale entries while we hold the write lock.
-            cache.retain(|_, v| v.recorded_at.elapsed() < Duration::from_secs(IKEY_TTL_SECS));
+            // --- Tier 1: in-memory check ---
+            {
+                let mut cache = self.ikey_cache.write().await;
+                cache.retain(|_, v| v.recorded_at.elapsed() < Duration::from_secs(IKEY_TTL_SECS));
 
-            match cache.get(&ikey) {
-                Some(entry) if !entry.order_id.is_empty() => {
-                    // Key seen before and order completed — return cached success response.
+                match cache.get(&ikey) {
+                    Some(entry) if !entry.order_id.is_empty() => {
+                        warn!(
+                            idempotency_key = %ikey,
+                            existing_order_id = %entry.order_id,
+                            trace_id = %trace_id,
+                            "Duplicate request detected (memory) — returning existing order_id"
+                        );
+                        return Ok(Response::new(SubmitOrderResponse {
+                            order_id: entry.order_id.clone(),
+                            success: true,
+                            message: "Duplicate: returning existing order".to_string(),
+                        }));
+                    }
+                    Some(_) => {
+                        warn!(
+                            idempotency_key = %ikey,
+                            trace_id = %trace_id,
+                            "Concurrent duplicate in-flight (memory) — acknowledging"
+                        );
+                        return Ok(Response::new(SubmitOrderResponse {
+                            order_id: String::new(),
+                            success: true,
+                            message: "Duplicate request acknowledged — order is being processed".to_string(),
+                        }));
+                    }
+                    None => {
+                        // Not in memory — insert a placeholder so concurrent same-process
+                        // duplicates are blocked.  We will do the DB check below *outside*
+                        // the write lock to avoid holding it during I/O.
+                        cache.insert(ikey.clone(), IdempotencyEntry {
+                            order_id: String::new(),
+                            recorded_at: Instant::now(),
+                        });
+                    }
+                }
+            } // write lock released
+
+            // --- Tier 2: DB fallback (crash-safe cross-restart dedup) ---
+            //
+            // The in-memory cache missed — this key either arrived fresh or was lost
+            // in a crash.  Check the DB first, then atomically reserve if absent.
+            match database::check_idempotency_key(&self.db_pool, &ikey).await {
+                Some(row) if !row.order_id.is_empty() => {
+                    // Previously committed order found in DB — update memory cache and return.
+                    {
+                        let mut cache = self.ikey_cache.write().await;
+                        if let Some(entry) = cache.get_mut(&ikey) {
+                            entry.order_id = row.order_id.clone();
+                        }
+                    }
                     warn!(
                         idempotency_key = %ikey,
-                        existing_order_id = %entry.order_id,
+                        existing_order_id = %row.order_id,
                         trace_id = %trace_id,
-                        "Duplicate request detected — returning existing order_id"
+                        "Duplicate request detected (DB crash-recovery) — returning existing order_id"
                     );
                     return Ok(Response::new(SubmitOrderResponse {
-                        order_id: entry.order_id.clone(),
+                        order_id: row.order_id,
                         success: true,
-                        message: "Duplicate: returning existing order".to_string(),
+                        message: "Duplicate: returning existing order (crash recovery)".to_string(),
                     }));
                 }
                 Some(_) => {
-                    // Key is reserved but order is still in flight — concurrent duplicate.
-                    // Return success acknowledgement; the caller should treat this as if the
-                    // order was accepted (it was — the first copy is executing).
+                    // Key exists in DB but has no order_id — previous run crashed mid-flight.
+                    // Treat as in-flight to be safe (caller should retry after TTL).
                     warn!(
                         idempotency_key = %ikey,
                         trace_id = %trace_id,
-                        "Concurrent duplicate request in flight — acknowledging without re-execution"
+                        "In-flight key found in DB after restart — acknowledging without re-execution"
                     );
                     return Ok(Response::new(SubmitOrderResponse {
                         order_id: String::new(),
@@ -154,15 +214,28 @@ impl Bot for BotService {
                     }));
                 }
                 None => {
-                    // First time we see this key: reserve it with an empty placeholder.
-                    // Any concurrent duplicate will hit the Some(_) branch above.
-                    cache.insert(ikey.clone(), IdempotencyEntry {
-                        order_id: String::new(), // in-flight marker
-                        recorded_at: Instant::now(),
-                    });
+                    // Key is absent from DB — atomically reserve it.
+                    // ON CONFLICT DO NOTHING handles the rare race between two restarted
+                    // processes that both missed the in-memory check simultaneously.
+                    let won_reservation = database::reserve_idempotency_key(&self.db_pool, &ikey).await;
+                    if !won_reservation {
+                        // Another process beat us to the DB reservation.
+                        warn!(
+                            idempotency_key = %ikey,
+                            trace_id = %trace_id,
+                            "Lost DB reservation race — acknowledging without re-execution"
+                        );
+                        // Clean up the in-memory placeholder we inserted above.
+                        self.ikey_cache.write().await.remove(&ikey);
+                        return Ok(Response::new(SubmitOrderResponse {
+                            order_id: String::new(),
+                            success: true,
+                            message: "Duplicate request acknowledged — order is being processed".to_string(),
+                        }));
+                    }
+                    // Won DB reservation — proceed with order execution below.
                 }
             }
-            // Write lock is dropped here before the (potentially slow) order submission.
         }
 
         let order = Order {
@@ -191,12 +264,15 @@ impl Bot for BotService {
 
         match self.order_manager.submit_order(order).await {
             Ok(order_id) => {
-                // Commit the reservation: update in-flight marker with real order_id.
+                // Commit the reservation in both memory and DB.
                 if !ikey.is_empty() {
-                    let mut cache = self.ikey_cache.write().await;
-                    if let Some(entry) = cache.get_mut(&ikey) {
-                        entry.order_id = order_id.clone();
+                    {
+                        let mut cache = self.ikey_cache.write().await;
+                        if let Some(entry) = cache.get_mut(&ikey) {
+                            entry.order_id = order_id.clone();
+                        }
                     }
+                    database::commit_idempotency_key(&self.db_pool, &ikey, &order_id).await;
                 }
                 info!(
                     trace_id = %trace_id,
@@ -212,8 +288,11 @@ impl Bot for BotService {
             Err(e) => {
                 // Release the reservation so retries can go through.
                 if !ikey.is_empty() {
-                    let mut cache = self.ikey_cache.write().await;
-                    cache.remove(&ikey);
+                    {
+                        let mut cache = self.ikey_cache.write().await;
+                        cache.remove(&ikey);
+                    }
+                    database::release_idempotency_key(&self.db_pool, &ikey).await;
                 }
                 error!(trace_id = %trace_id, error = %e, "Failed to submit order");
                 Ok(Response::new(SubmitOrderResponse {
