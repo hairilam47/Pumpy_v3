@@ -8,7 +8,6 @@ const WS_URL = (() => {
 })();
 
 const RECONNECT_DELAY_MS = 5_000;
-const PROBE_INTERVAL_MS = 15_000;
 
 type ConnectionState = "connecting" | "online" | "offline";
 
@@ -43,10 +42,8 @@ export default function OfflineBanner() {
     ws.onopen = () => {
       setConnState("online");
       setDismissed(false);
-      // Schedule periodic re-check
-      timerRef.current = setTimeout(() => {
-        connect();
-      }, PROBE_INTERVAL_MS);
+      // Server-side ping/pong (every 20 s) keeps this connection alive;
+      // no client-side periodic re-probe needed.
     };
 
     ws.onerror = () => {
@@ -54,11 +51,7 @@ export default function OfflineBanner() {
     };
 
     ws.onclose = () => {
-      if (connState !== "online") {
-        setConnState("offline");
-      } else {
-        setConnState("offline");
-      }
+      setConnState("offline");
       timerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
     };
   }
