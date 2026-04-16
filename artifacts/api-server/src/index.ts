@@ -1,4 +1,6 @@
 import { createServer } from "http";
+import { spawn } from "child_process";
+import path from "path";
 import { EventEmitter } from "events";
 import { WebSocketServer, type WebSocket } from "ws";
 import type * as grpc from "@grpc/grpc-js";
@@ -223,6 +225,29 @@ httpServer.on("upgrade", (req, socket, head) => {
     socket.destroy();
   }
 });
+
+// ── Python strategy engine (production only) ──────────────────────────────────
+// In production, the Python engine runs as a child process alongside Node.js
+// so the entire application is served from a single port (8080).
+// In development each service runs independently via its own workflow.
+if (process.env["NODE_ENV"] === "production") {
+  const pythonCwd = path.resolve(process.cwd(), "python-strategy");
+  const py = spawn("python", ["main.py"], {
+    cwd: pythonCwd,
+    stdio: "inherit",
+    env: { ...process.env, PORT: "8001" },
+  });
+  py.on("error", (err) => {
+    logger.warn(
+      { err: err.message },
+      "Python strategy engine failed to start — API continues without it",
+    );
+  });
+  py.on("exit", (code, signal) => {
+    logger.warn({ code, signal }, "Python strategy engine exited");
+  });
+  logger.info({ cwd: pythonCwd }, "Python strategy engine started");
+}
 
 // Start the singleton gRPC stream once at server boot
 startSingletonStream();

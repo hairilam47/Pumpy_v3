@@ -7,6 +7,10 @@ pnpm install --frozen-lockfile
 echo "==> Installing Python dependencies..."
 pip install -r python-strategy/requirements.txt --quiet --no-warn-script-location
 
+echo "==> Building dashboard (static files served by Express in production)..."
+BASE_PATH="/dashboard/" PORT=23183 \
+  pnpm --filter @workspace/dashboard run build
+
 echo "==> Building Node.js API server..."
 pnpm --filter @workspace/api-server run build
 
