@@ -3,13 +3,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle, XCircle, AlertCircle, Wifi, WifiOff, Key, Server,
   Settings2, AlertTriangle, Save, Loader2, FlaskConical, Shield,
-  Info, X,
+  Info, X, Zap,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { useAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
@@ -535,6 +536,176 @@ function ServiceUrlsCard({ config }: { config: ConfigMap }) {
   );
 }
 
+// ── Jito MEV Settings Card ────────────────────────────────────────────────────
+
+function JitoMevSettingsCard({ config }: { config: ConfigMap }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [tipPercent, setTipPercent] = useState(config["JITO_TIP_PERCENT"] ?? "0.001");
+  const [tipFloor, setTipFloor] = useState(config["JITO_TIP_FLOOR_LAMPORTS"] ?? "5000");
+  const [tipCeiling, setTipCeiling] = useState(config["JITO_TIP_CEILING_LAMPORTS"] ?? "10000000");
+  const [simEnabled, setSimEnabled] = useState(
+    (config["JITO_SIMULATION_ENABLED"] ?? "true") === "true"
+  );
+  const [isSaving, setIsSaving] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
+
+  useEffect(() => {
+    setTipPercent(config["JITO_TIP_PERCENT"] ?? "0.001");
+    setTipFloor(config["JITO_TIP_FLOOR_LAMPORTS"] ?? "5000");
+    setTipCeiling(config["JITO_TIP_CEILING_LAMPORTS"] ?? "10000000");
+    setSimEnabled((config["JITO_SIMULATION_ENABLED"] ?? "true") === "true");
+  }, [config]);
+
+  function lamportsToSol(lamports: string): string {
+    const n = parseFloat(lamports);
+    if (isNaN(n) || n < 0) return "—";
+    const sol = n / 1e9;
+    if (sol === 0) return "0 SOL";
+    if (sol < 0.000001) return `${sol.toExponential(2)} SOL`;
+    return `${sol.toFixed(9).replace(/\.?0+$/, "")} SOL`;
+  }
+
+  function tipPercentDisplay(val: string): string {
+    const n = parseFloat(val);
+    if (isNaN(n) || n < 0) return "—";
+    const pct = n * 100;
+    return `${pct < 0.001 ? pct.toExponential(2) : pct.toFixed(4).replace(/\.?0+$/, "")}%`;
+  }
+
+  async function handleSave() {
+    setIsSaving(true);
+    setSavedOk(false);
+    try {
+      const res = await fetch("/api/settings/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          JITO_TIP_PERCENT: tipPercent.trim(),
+          JITO_TIP_FLOOR_LAMPORTS: tipFloor.trim(),
+          JITO_TIP_CEILING_LAMPORTS: tipCeiling.trim(),
+          JITO_SIMULATION_ENABLED: simEnabled ? "true" : "false",
+        }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast({ title: "Jito MEV settings saved" });
+      setSavedOk(true);
+      void queryClient.invalidateQueries({ queryKey: ["settingsConfig"] });
+    } catch {
+      toast({ title: "Failed to save Jito settings", variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Zap className="w-4 h-4 text-primary" />
+          Jito MEV Settings
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {savedOk && (
+          <div className="flex items-start gap-2 rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 text-xs text-green-400">
+            <CheckCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <span>
+              Settings saved. Changes apply to the <strong>next order</strong> — no engine restart required.
+            </span>
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <Label htmlFor="jito-tip-pct" className="text-xs">
+            Tip Percent
+            <span className="ml-1.5 text-muted-foreground font-normal">
+              (JITO_TIP_PERCENT — fraction of trade value, e.g. 0.001 = 0.1%)
+            </span>
+          </Label>
+          <div className="flex items-center gap-2">
+            <Input
+              id="jito-tip-pct"
+              value={tipPercent}
+              onChange={(e) => { setTipPercent(e.target.value); setSavedOk(false); }}
+              placeholder="0.001"
+              className="font-mono text-xs max-w-[160px]"
+            />
+            <span className="text-xs text-muted-foreground">
+              = {tipPercentDisplay(tipPercent)} of trade value
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="jito-floor" className="text-xs">
+              Tip Floor
+              <span className="ml-1.5 text-muted-foreground font-normal">(JITO_TIP_FLOOR_LAMPORTS)</span>
+            </Label>
+            <Input
+              id="jito-floor"
+              value={tipFloor}
+              onChange={(e) => { setTipFloor(e.target.value); setSavedOk(false); }}
+              placeholder="5000"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">Min tip: {lamportsToSol(tipFloor)}</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="jito-ceiling" className="text-xs">
+              Tip Ceiling
+              <span className="ml-1.5 text-muted-foreground font-normal">(JITO_TIP_CEILING_LAMPORTS)</span>
+            </Label>
+            <Input
+              id="jito-ceiling"
+              value={tipCeiling}
+              onChange={(e) => { setTipCeiling(e.target.value); setSavedOk(false); }}
+              placeholder="10000000"
+              className="font-mono text-xs"
+            />
+            <p className="text-[11px] text-muted-foreground">Max tip: {lamportsToSol(tipCeiling)}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <Switch
+            id="jito-sim"
+            checked={simEnabled}
+            onCheckedChange={(v) => { setSimEnabled(v); setSavedOk(false); }}
+          />
+          <Label htmlFor="jito-sim" className="text-xs cursor-pointer">
+            Pre-submission Simulation
+            <span className="ml-1.5 text-muted-foreground font-normal">
+              (JITO_SIMULATION_ENABLED)
+            </span>
+          </Label>
+          <Badge
+            variant="secondary"
+            className={cn(
+              "text-xs",
+              simEnabled ? "bg-green-500/15 text-green-400" : "bg-muted text-muted-foreground"
+            )}
+          >
+            {simEnabled ? "Enabled" : "Disabled"}
+          </Badge>
+        </div>
+
+        <Button onClick={handleSave} disabled={isSaving} size="sm">
+          {isSaving ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+          ) : (
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+          )}
+          Save Jito settings
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Safe Wallet Setup Guide ───────────────────────────────────────────────────
 
 function Code({ children }: { children: React.ReactNode }) {
@@ -717,6 +888,7 @@ export default function SettingsPage() {
       {config && !configLoading && (
         <>
           <ConnectionCard config={config} />
+          <JitoMevSettingsCard config={config} />
           <ServiceUrlsCard config={config} />
         </>
       )}
