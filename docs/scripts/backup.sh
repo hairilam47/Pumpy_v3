@@ -35,7 +35,7 @@ fi
 if [ -n "${DATABASE_URL:-}" ]; then
   CONFIG_FILE="$BACKUP_DIR/config_$TIMESTAMP.dump"
   pg_dump "$DATABASE_URL" -Fc \
-    -t bot_config -t wallet_config -t wallets \
+    -t bot_config -t wallet_config -t wallet_registry \
     -f "$CONFIG_FILE" 2>/dev/null || \
     echo "[backup] WARN: Some config tables missing (skipped)"
   echo "[backup] Config snapshot: $CONFIG_FILE"
