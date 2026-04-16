@@ -739,6 +739,12 @@ impl OrderManager {
         self.update_order_status(&order).await?;
         self.emit_event(&order);
 
+        if order.status == OrderStatus::Executed {
+            if let Err(e) = self.record_trade(&order).await {
+                warn!(order_id = %order.id, error = %e, "Failed to record trade in trades table");
+            }
+        }
+
         let mut active = self.active_orders.write().await;
         active.remove(&order.id);
         self.metrics.active_orders.dec();
@@ -746,6 +752,37 @@ impl OrderManager {
         let mut history = self.order_history.write().await;
         history.insert(order.id.clone(), order);
 
+        Ok(())
+    }
+
+    /// Insert a completed trade row into the `trades` table, including `client_order_id` (Task #39).
+    /// Non-fatal: callers log the error and continue.
+    async fn record_trade(&self, order: &Order) -> Result<(), OrderError> {
+        let amount_sol = order.amount as f64 / 1_000_000_000.0;
+        let client_order_id = order.client_order_id.map(|id| id.to_string());
+        sqlx::query(
+            r#"
+            INSERT INTO trades (
+                id, mint, side, amount_sol, price, status, strategy,
+                signature, slippage_bps, created_at, executed_at, client_order_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(&order.id)
+        .bind(&order.mint)
+        .bind(order.side.to_string())
+        .bind(amount_sol)
+        .bind(order.price)
+        .bind("Executed")
+        .bind(&order.strategy)
+        .bind(&order.signature)
+        .bind(order.slippage_bps as i32)
+        .bind(order.created_at)
+        .bind(order.executed_at)
+        .bind(client_order_id)
+        .execute(&self.db_pool.pool)
+        .await?;
         Ok(())
     }
 
@@ -1285,6 +1322,12 @@ impl OrderManagerMinimal {
         .execute(&self.db_pool.pool)
         .await?;
 
+        if order.status == OrderStatus::Executed {
+            if let Err(e) = self.record_trade(&order).await {
+                warn!(order_id = %order.id, error = %e, "Failed to record trade in trades table (minimal path)");
+            }
+        }
+
         self.emit_event_minimal(&order);
 
         let mut active = self.active_orders.write().await;
@@ -1309,6 +1352,37 @@ impl OrderManagerMinimal {
             executed_amount: order.executed_amount,
         };
         let _ = self.event_tx.send(event);
+    }
+
+    /// Insert a completed trade row into the `trades` table, including `client_order_id` (Task #39).
+    /// Non-fatal: callers log the error and continue.
+    async fn record_trade(&self, order: &Order) -> Result<(), crate::order::OrderError> {
+        let amount_sol = order.amount as f64 / 1_000_000_000.0;
+        let client_order_id = order.client_order_id.map(|id| id.to_string());
+        sqlx::query(
+            r#"
+            INSERT INTO trades (
+                id, mint, side, amount_sol, price, status, strategy,
+                signature, slippage_bps, created_at, executed_at, client_order_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(&order.id)
+        .bind(&order.mint)
+        .bind(order.side.to_string())
+        .bind(amount_sol)
+        .bind(order.price)
+        .bind("Executed")
+        .bind(&order.strategy)
+        .bind(&order.signature)
+        .bind(order.slippage_bps as i32)
+        .bind(order.created_at)
+        .bind(order.executed_at)
+        .bind(client_order_id)
+        .execute(&self.db_pool.pool)
+        .await?;
+        Ok(())
     }
 }
 
@@ -1415,5 +1489,35 @@ mod tests {
 
         assert_eq!(result.unwrap(), "bundle_z");
         assert!(bundle_called.load(Ordering::SeqCst));
+    }
+
+    // ── record_trade helpers (Task #39) ──────────────────────────────────────
+
+    /// Lamport-to-SOL conversion used by record_trade must be exact for common values.
+    #[test]
+    fn test_record_trade_amount_sol_conversion() {
+        let lamports: u64 = 500_000_000;
+        let sol = lamports as f64 / 1_000_000_000.0;
+        assert!((sol - 0.5_f64).abs() < f64::EPSILON, "500_000_000 lamports == 0.5 SOL");
+
+        let one_sol_lamports: u64 = 1_000_000_000;
+        let one_sol = one_sol_lamports as f64 / 1_000_000_000.0;
+        assert!((one_sol - 1.0_f64).abs() < f64::EPSILON, "1_000_000_000 lamports == 1.0 SOL");
+    }
+
+    /// client_order_id UUID is serialised to a lowercase hyphenated string for the text column.
+    #[test]
+    fn test_record_trade_client_order_id_to_string() {
+        let id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let as_str = id.to_string();
+        assert_eq!(as_str, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    /// None client_order_id maps to None (no string), not an empty string.
+    #[test]
+    fn test_record_trade_client_order_id_none_is_none() {
+        let coid: Option<uuid::Uuid> = None;
+        let mapped: Option<String> = coid.map(|id| id.to_string());
+        assert!(mapped.is_none(), "None client_order_id should produce None string");
     }
 }
