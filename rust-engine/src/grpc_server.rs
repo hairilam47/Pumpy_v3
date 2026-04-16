@@ -178,8 +178,27 @@ impl Bot for BotService {
             //
             // The in-memory cache missed — this key either arrived fresh or was lost
             // in a crash.  Check the DB first, then atomically reserve if absent.
+            //
+            // IMPORTANT: DB errors must propagate as gRPC errors (Status::unavailable),
+            // NOT silently treated as "key not found" or "reservation lost".  Swallowing
+            // DB errors would drop valid orders while returning success to the caller.
             match database::check_idempotency_key(&self.db_pool, &ikey).await {
-                Some(row) if !row.order_id.is_empty() => {
+                Err(db_err) => {
+                    // Transient DB failure — clean up the in-memory placeholder and let
+                    // the caller retry.  Do NOT return success: that would silently drop
+                    // the order while telling the caller it succeeded.
+                    self.ikey_cache.write().await.remove(&ikey);
+                    error!(
+                        idempotency_key = %ikey,
+                        trace_id = %trace_id,
+                        error = %db_err,
+                        "DB error checking idempotency key — rejecting request so caller can retry"
+                    );
+                    return Err(Status::unavailable(
+                        "Idempotency DB temporarily unavailable — please retry",
+                    ));
+                }
+                Ok(Some(row)) if !row.order_id.is_empty() => {
                     // Previously committed order found in DB — update memory cache and return.
                     {
                         let mut cache = self.ikey_cache.write().await;
@@ -199,7 +218,7 @@ impl Bot for BotService {
                         message: "Duplicate: returning existing order (crash recovery)".to_string(),
                     }));
                 }
-                Some(_) => {
+                Ok(Some(_)) => {
                     // Key exists in DB but has no order_id — previous run crashed mid-flight.
                     // Treat as in-flight to be safe (caller should retry after TTL).
                     warn!(
@@ -213,27 +232,42 @@ impl Bot for BotService {
                         message: "Duplicate request acknowledged — order is being processed".to_string(),
                     }));
                 }
-                None => {
+                Ok(None) => {
                     // Key is absent from DB — atomically reserve it.
                     // ON CONFLICT DO NOTHING handles the rare race between two restarted
                     // processes that both missed the in-memory check simultaneously.
-                    let won_reservation = database::reserve_idempotency_key(&self.db_pool, &ikey).await;
-                    if !won_reservation {
-                        // Another process beat us to the DB reservation.
-                        warn!(
-                            idempotency_key = %ikey,
-                            trace_id = %trace_id,
-                            "Lost DB reservation race — acknowledging without re-execution"
-                        );
-                        // Clean up the in-memory placeholder we inserted above.
-                        self.ikey_cache.write().await.remove(&ikey);
-                        return Ok(Response::new(SubmitOrderResponse {
-                            order_id: String::new(),
-                            success: true,
-                            message: "Duplicate request acknowledged — order is being processed".to_string(),
-                        }));
+                    match database::reserve_idempotency_key(&self.db_pool, &ikey).await {
+                        Err(db_err) => {
+                            // Transient DB failure during reservation — reject with a retryable error.
+                            self.ikey_cache.write().await.remove(&ikey);
+                            error!(
+                                idempotency_key = %ikey,
+                                trace_id = %trace_id,
+                                error = %db_err,
+                                "DB error reserving idempotency key — rejecting request so caller can retry"
+                            );
+                            return Err(Status::unavailable(
+                                "Idempotency DB temporarily unavailable — please retry",
+                            ));
+                        }
+                        Ok(false) => {
+                            // Another process beat us to the DB reservation (true duplicate race).
+                            warn!(
+                                idempotency_key = %ikey,
+                                trace_id = %trace_id,
+                                "Lost DB reservation race — acknowledging without re-execution"
+                            );
+                            self.ikey_cache.write().await.remove(&ikey);
+                            return Ok(Response::new(SubmitOrderResponse {
+                                order_id: String::new(),
+                                success: true,
+                                message: "Duplicate request acknowledged — order is being processed".to_string(),
+                            }));
+                        }
+                        Ok(true) => {
+                            // Won the DB reservation — proceed with order execution below.
+                        }
                     }
-                    // Won DB reservation — proceed with order execution below.
                 }
             }
         }

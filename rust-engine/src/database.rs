@@ -574,22 +574,30 @@ pub struct IdempotencyKeyRow {
 }
 
 /// Look up a persisted idempotency key.
-/// Returns None if the key has never been seen or has already been cleaned up.
-pub async fn check_idempotency_key(pool: &DbPool, key: &str) -> Option<IdempotencyKeyRow> {
+/// Returns Ok(None) if the key has never been seen or has been cleaned up.
+/// Returns Err on transient DB failure — callers must handle this explicitly
+/// and NOT silently treat it as "key not found".
+pub async fn check_idempotency_key(
+    pool: &DbPool,
+    key: &str,
+) -> Result<Option<IdempotencyKeyRow>, sqlx::Error> {
     sqlx::query_as::<_, IdempotencyKeyRow>(
         "SELECT ikey, order_id FROM idempotency_keys WHERE ikey = $1",
     )
     .bind(key)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
 }
 
 /// Atomically reserve a key in the DB (INSERT … ON CONFLICT DO NOTHING).
-/// Returns `true` if this caller owns the reservation, `false` if another
-/// process already holds it (concurrent duplicate after a restart).
-pub async fn reserve_idempotency_key(pool: &DbPool, key: &str) -> bool {
+/// Returns Ok(true) if this caller owns the reservation.
+/// Returns Ok(false) if another process already holds it (concurrent duplicate).
+/// Returns Err on transient DB failure — callers must handle this explicitly
+/// and NOT silently treat it as "reservation lost" (that would drop valid orders).
+pub async fn reserve_idempotency_key(
+    pool: &DbPool,
+    key: &str,
+) -> Result<bool, sqlx::Error> {
     sqlx::query(
         "INSERT INTO idempotency_keys (ikey, order_id, created_at) \
          VALUES ($1, '', NOW()) \
@@ -599,7 +607,6 @@ pub async fn reserve_idempotency_key(pool: &DbPool, key: &str) -> bool {
     .execute(pool)
     .await
     .map(|r| r.rows_affected() == 1)
-    .unwrap_or(false)
 }
 
 /// Record the completed order_id for a key so crash-recovery retries return it.
