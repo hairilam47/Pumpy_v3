@@ -1503,7 +1503,7 @@ mod tests {
         assert!((one_sol - 1.0_f64).abs() < f64::EPSILON, "1_000_000_000 lamports == 1.0 SOL");
     }
 
-    /// client_order_id UUID is serialised to a lowercase hyphenated string for the text column.
+    /// client_order_id UUID round-trips correctly via its standard hyphenated string representation.
     #[test]
     fn test_record_trade_client_order_id_to_string() {
         let id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
