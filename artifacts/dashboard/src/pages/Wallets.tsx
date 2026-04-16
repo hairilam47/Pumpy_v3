@@ -7,6 +7,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
@@ -87,6 +89,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
   const { data: config } = useWalletConfig(wallet.walletId);
   const [showKeyPrompt, setShowKeyPrompt] = useState(false);
   const [adminKey, setAdminKey] = useAdminKey();
+  const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const resumeMutation = useMutation({
     mutationFn: async (key: string) => {
@@ -107,7 +110,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
     onSuccess: () => {
       toast({ title: `Wallet ${wallet.walletId} resumed` });
       setShowKeyPrompt(false);
-      setAdminKey("");
+      if (!rememberKey) setAdminKey("");
       void qc.invalidateQueries({ queryKey: ["wallets"] });
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
@@ -118,6 +121,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
         variant: "destructive",
       });
       setAdminKey("");
+      setRememberKey(false);
     },
   });
 
@@ -193,38 +197,48 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
               )}
             </div>
             {showKeyPrompt && (
-              <div className="flex items-center gap-2 pt-1">
-                <KeyRound className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-                <Input
-                  type="password"
-                  placeholder="Enter admin key…"
-                  value={adminKey}
-                  onChange={(e) => setAdminKey(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && adminKey) resumeMutation.mutate(adminKey);
-                    if (e.key === "Escape") { setShowKeyPrompt(false); setAdminKey(""); }
-                  }}
-                  className="h-7 text-xs flex-1"
-                  autoFocus
-                />
-                <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => resumeMutation.mutate(adminKey)}
-                  disabled={!adminKey || resumeMutation.isPending}
-                >
-                  {resumeMutation.isPending ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : "Confirm"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 w-7 p-0"
-                  onClick={() => { setShowKeyPrompt(false); setAdminKey(""); }}
-                >
-                  <X className="w-3.5 h-3.5" />
-                </Button>
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                  <Input
+                    type="password"
+                    placeholder="Enter admin key…"
+                    value={adminKey}
+                    onChange={(e) => setAdminKey(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && adminKey) resumeMutation.mutate(adminKey);
+                      if (e.key === "Escape") { setShowKeyPrompt(false); setAdminKey(""); setRememberKey(false); }
+                    }}
+                    className="h-7 text-xs flex-1"
+                    autoFocus
+                  />
+                  <Button
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => resumeMutation.mutate(adminKey)}
+                    disabled={!adminKey || resumeMutation.isPending}
+                  >
+                    {resumeMutation.isPending ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : "Confirm"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    onClick={() => { setShowKeyPrompt(false); setAdminKey(""); setRememberKey(false); }}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+                <Label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer font-normal pl-6">
+                  <Checkbox
+                    id={`remember-key-wallets-${wallet.walletId}`}
+                    checked={rememberKey}
+                    onCheckedChange={(c) => setRememberKey(c === true)}
+                  />
+                  Remember for 1 hour
+                </Label>
               </div>
             )}
           </div>

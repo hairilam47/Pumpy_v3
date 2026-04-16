@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { useAdminKey } from "@/hooks/use-admin-key";
 import { cn } from "@/lib/utils";
@@ -314,6 +315,7 @@ function StrategyPresetCard() {
   const { data: presetData } = useActivePreset();
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
   const [adminKey, setAdminKey] = useAdminKey();
+  const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const activePreset = (presetData?.preset ?? "balanced") as PresetId;
 
@@ -337,11 +339,12 @@ function StrategyPresetCard() {
       toast({ title: `Strategy preset set to ${preset}` });
       void qc.invalidateQueries({ queryKey: ["activePreset"] });
       setPendingPreset(null);
-      setAdminKey("");
+      if (!rememberKey) setAdminKey("");
     },
     onError: (err: Error) => {
       toast({ title: "Failed to save preset", description: err.message, variant: "destructive" });
       setAdminKey("");
+      setRememberKey(false);
     },
   });
 
@@ -413,7 +416,7 @@ function StrategyPresetCard() {
                 onChange={(e) => setAdminKey(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && adminKey) savePreset.mutate({ preset: pendingPreset, key: adminKey });
-                  if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); }
+                  if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }
                 }}
                 className="h-7 text-xs flex-1"
                 autoFocus
@@ -430,11 +433,19 @@ function StrategyPresetCard() {
                 size="sm"
                 variant="ghost"
                 className="h-7 w-7 p-0"
-                onClick={() => { setPendingPreset(null); setAdminKey(""); }}
+                onClick={() => { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }}
               >
                 <X className="w-3.5 h-3.5" />
               </Button>
             </div>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+              <Checkbox
+                id="remember-key-settings"
+                checked={rememberKey}
+                onCheckedChange={(c) => setRememberKey(c === true)}
+              />
+              Remember for 1 hour
+            </label>
           </div>
         )}
 

@@ -123,20 +123,24 @@ export default function DashboardPage() {
     const now = Date.now();
 
     if (chartWindow === "24h") {
-      const cutoff = now - 24 * 60 * 60 * 1000;
-      const hourMap: Record<string, number> = {};
+      const msPerHour = 60 * 60 * 1000;
+      const cutoff = now - 24 * msPerHour;
+      const epochHourOf = (ms: number) => Math.floor(ms / msPerHour);
+      const currentEpochHour = epochHourOf(now);
+      const hourMap: Record<number, number> = {};
       for (const t of trades) {
         if (!t.createdAt) continue;
-        const d = new Date(t.createdAt);
-        if (d.getTime() < cutoff) continue;
-        const hour = `${String(d.getHours()).padStart(2, "0")}:00`;
-        hourMap[hour] = (hourMap[hour] ?? 0) + (t.pnlSol ?? 0);
+        const ts = new Date(t.createdAt).getTime();
+        if (ts < cutoff) continue;
+        const bucket = epochHourOf(ts);
+        hourMap[bucket] = (hourMap[bucket] ?? 0) + (t.pnlSol ?? 0);
       }
-      const hours = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
       let cumulative = 0;
-      return hours.map((h) => {
-        cumulative += hourMap[h] ?? 0;
-        return { time: h, pnl: cumulative };
+      return Array.from({ length: 24 }, (_, i) => {
+        const bucket = currentEpochHour - 23 + i;
+        const label = `${String(new Date(bucket * msPerHour).getHours()).padStart(2, "0")}:00`;
+        cumulative += hourMap[bucket] ?? 0;
+        return { time: label, pnl: cumulative };
       });
     } else {
       const cutoff = now - 7 * 24 * 60 * 60 * 1000;

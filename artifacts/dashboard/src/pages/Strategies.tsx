@@ -4,6 +4,8 @@ import { Shield, Loader2, AlertTriangle, CheckCircle2, Zap, TrendingUp, KeyRound
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useAdminKey } from "@/hooks/use-admin-key";
@@ -93,6 +95,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
   const { data: config, isLoading } = useWalletConfig(wallet.walletId);
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
   const [adminKey, setAdminKey] = useAdminKey();
+  const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const activePreset = (config?.strategyPreset ?? "balanced") as PresetId;
 
@@ -115,12 +118,13 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
     onSuccess: (_data, { preset }) => {
       toast({ title: `Preset changed to ${preset} for ${wallet.walletId}` });
       setPendingPreset(null);
-      setAdminKey("");
+      if (!rememberKey) setAdminKey("");
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to change preset", description: err.message, variant: "destructive" });
       setAdminKey("");
+      setRememberKey(false);
     },
   });
 
@@ -235,7 +239,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   onChange={(e) => setAdminKey(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && adminKey) changePreset.mutate({ preset: pendingPreset, key: adminKey });
-                    if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); }
+                    if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }
                   }}
                   className="h-7 text-xs flex-1"
                   autoFocus
@@ -252,11 +256,19 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   size="sm"
                   variant="ghost"
                   className="h-7 w-7 p-0"
-                  onClick={() => { setPendingPreset(null); setAdminKey(""); }}
+                  onClick={() => { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }}
                 >
                   <X className="w-3.5 h-3.5" />
                 </Button>
               </div>
+              <Label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer font-normal">
+                <Checkbox
+                  id={`remember-key-strategies-${wallet.walletId}`}
+                  checked={rememberKey}
+                  onCheckedChange={(c) => setRememberKey(c === true)}
+                />
+                Remember for 1 hour
+              </Label>
             </div>
           )}
           </>
