@@ -1,5 +1,38 @@
 # The format of this file is identical to `.dockerignore`.
 # It is used to reduce the size of deployed images to make the process of publishing faster.
 
-# No need to store the pnpm store twice.
+# ── Rust build artifacts (~6 GB) ──────────────────────────────────────────────
+rust-engine/target/
+
+# ── Replit internal directories ────────────────────────────────────────────────
 .local
+.cache
+.upm
+
+# ── Python package store (~1.1 GB) ────────────────────────────────────────────
+.pythonlibs
+
+# ── Git history (~700 MB) ─────────────────────────────────────────────────────
+.git
+
+# ── Node.js dependencies (reinstalled during build) ──────────────────────────
+**/node_modules
+**/.pnpm-store
+.pnpm-store
+
+# ── Python bytecode caches ────────────────────────────────────────────────────
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# ── Build outputs (regenerated during deployment build) ───────────────────────
+artifacts/dashboard/dist
+artifacts/api-server/dist
+artifacts/mockup-sandbox/dist
+
+# ── Miscellaneous dev-only files ─────────────────────────────────────────────
+**/*.log
+**/*.swp
+**/.DS_Store
+**/*.edit.toml
+tmp
