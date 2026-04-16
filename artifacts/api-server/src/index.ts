@@ -42,6 +42,7 @@ interface LiveTradePayload {
   strategy?: string;
   pnlSol?: number | null;
   createdAt: string;
+  traceId?: string | null;
 }
 
 const orderEmitter = new EventEmitter();
@@ -77,11 +78,22 @@ async function enrichUpdate(update: OrderUpdate): Promise<LiveTradePayload> {
       payload.tokenName = row.tokenName ?? undefined;
       payload.strategy = row.strategy;
       payload.pnlSol = row.pnlSol;
+      payload.traceId = row.traceId ?? null;
       if (payload.amountSol == null) payload.amountSol = row.amountSol;
     }
   } catch {
     // DB not available — continue with base fields
   }
+
+  logger.info(
+    {
+      event: "order_relay",
+      order_id: update.order_id,
+      status: update.status,
+      trace_id: payload.traceId ?? "no-trace",
+    },
+    "Relaying order event to WebSocket clients",
+  );
 
   return payload;
 }

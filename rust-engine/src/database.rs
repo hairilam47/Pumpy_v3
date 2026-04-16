@@ -116,6 +116,19 @@ pub async fn run_migrations(db: &DatabasePool) -> Result<(), sqlx::Error> {
     .execute(&db.pool)
     .await?;
 
+    // Distributed tracing: add trace_id to trades for cross-service log correlation (Task #31)
+    sqlx::query(
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS trace_id TEXT"
+    )
+    .execute(&db.pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS trades_trace_id_idx ON trades (trace_id) WHERE trace_id IS NOT NULL"
+    )
+    .execute(&db.pool)
+    .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS bot_config (

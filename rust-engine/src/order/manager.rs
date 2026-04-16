@@ -268,7 +268,14 @@ impl OrderManager {
         self.metrics.orders_submitted.inc();
         self.metrics.pending_orders.inc();
 
-        info!("Order submitted: {} ({} {} {})", order.id, order.side, order.mint, order.amount);
+        info!(
+            order_id = %order.id,
+            side = %order.side,
+            mint = %order.mint,
+            amount = order.amount,
+            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+            "Order submitted"
+        );
 
         self.order_tx.send(order.clone())?;
 
@@ -438,7 +445,12 @@ impl OrderManager {
         )
         .await
         .unwrap_or_else(|_| {
-            warn!("Order {} timed out after {:?}", order.id, self.config.order_timeout);
+            warn!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                timeout_secs = self.config.order_timeout.as_secs(),
+                "Order timed out"
+            );
             Err(format!("Order timed out after {:?}", self.config.order_timeout).into())
         });
 
@@ -460,6 +472,7 @@ impl OrderManager {
                         * 2u32.pow(order.retry_count.saturating_sub(1));
                     warn!(
                         order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                         attempt = order.retry_count,
                         max_retries = self.config.max_retries,
                         backoff_ms = backoff.as_millis(),
@@ -477,6 +490,7 @@ impl OrderManager {
                 }
                 warn!(
                     order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                     attempt = order.retry_count + 1,
                     reason = %err_str,
                     retriable = is_retriable_error(&err_str),
@@ -503,6 +517,7 @@ impl OrderManager {
                     let max_cost = order.max_cost.unwrap_or(dyn_max_cost);
                     info!(
                         order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                         price_impact_bps = impact_bps,
                         max_sol_cost = max_cost,
                         "dynamic buy slippage from bonding curve"
@@ -515,6 +530,7 @@ impl OrderManager {
                     let min_output = order.min_output.unwrap_or(dyn_min_output);
                     info!(
                         order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                         price_impact_bps = impact_bps,
                         min_sol_output = min_output,
                         "dynamic sell slippage from bonding curve"
@@ -525,6 +541,7 @@ impl OrderManager {
             Err(e) => {
                 warn!(
                     order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                     error = %e,
                     "bonding curve fetch failed; using static slippage"
                 );
@@ -559,7 +576,12 @@ impl OrderManager {
                 match self.execute_via_jito(mint, order, jito.clone(), dynamic_max_cost, dynamic_min_output).await {
                     Ok(sig) => {
                         self.metrics.jito_bundles_landed.inc();
-                        info!(order_id = %order.id, sig = %sig, "executed via Jito bundle");
+                        info!(
+                            order_id = %order.id,
+                            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                            sig = %sig,
+                            "executed via Jito bundle"
+                        );
                         return Ok(sig);
                     }
                     Err(e) if e.to_string().starts_with("simulation_rejected:") => {
@@ -570,6 +592,7 @@ impl OrderManager {
                     Err(e) => {
                         warn!(
                             order_id = %order.id,
+                            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                             error = %e,
                             "Jito bundle failed (both attempts); falling back to RPC"
                         );
@@ -581,6 +604,7 @@ impl OrderManager {
         // Direct RPC fallback — use pre-computed bounds.
         info!(
             order_id = %order.id,
+            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
             max_sol_cost = dynamic_max_cost,
             min_sol_output = dynamic_min_output,
             "Dynamic slippage bounds applied for RPC execution"
@@ -647,7 +671,11 @@ impl OrderManager {
         let payer = self.pumpfun_client.pubkey();
         let tip_instruction = jito.create_tip_instruction(&payer, tip_lamports);
         if tip_instruction.is_none() {
-            warn!(order_id = %order.id, "No Jito tip accounts available — bundle will land without tip");
+            warn!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                "No Jito tip accounts available — bundle will land without tip"
+            );
         }
 
         // Pre-submission simulation: reject orders likely to fail on-chain before they
@@ -670,7 +698,11 @@ impl OrderManager {
                 }
             };
             jito.execute_simulation_gate(&sim_tx, &order.id).await?;
-            info!(order_id = %order.id, "Pre-submission simulation passed");
+            info!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                "Pre-submission simulation passed"
+            );
         }
 
         // Attempt Jito bundle submission — retries once on any rejection before giving up.
@@ -679,6 +711,7 @@ impl OrderManager {
             if jito_attempt > 0 {
                 warn!(
                     order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                     jito_attempt,
                     "Jito bundle rejected, retrying after 2 s"
                 );
@@ -701,12 +734,22 @@ impl OrderManager {
             let bundle_id = match jito.send_bundle(vec![trade_tx]).await {
                 Ok(id) => id,
                 Err(e) => {
-                    warn!(order_id = %order.id, jito_attempt, reason = %e, tip_lamports, "Jito send_bundle error (treated as rejection)");
+                    warn!(
+                        order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                        jito_attempt, reason = %e, tip_lamports,
+                        "Jito send_bundle error (treated as rejection)"
+                    );
                     continue;
                 }
             };
 
-            info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, tip_lamports, "Jito bundle submitted (tip instruction included)");
+            info!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                bundle_id = %bundle_id, jito_attempt, tip_lamports,
+                "Jito bundle submitted (tip instruction included)"
+            );
 
             // Poll for bundle status (up to 5 seconds).
             let mut bundle_failed = false;
@@ -714,7 +757,12 @@ impl OrderManager {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 match jito.get_bundle_status(&bundle_id).await {
                     Ok(status) if status == "confirmed" || status == "finalized" => {
-                        info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, "Jito bundle landed");
+                        info!(
+                            order_id = %order.id,
+                            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                            bundle_id = %bundle_id, jito_attempt,
+                            "Jito bundle landed"
+                        );
                         return Ok(bundle_id);
                     }
                     Ok(status) if status == "failed" => {
@@ -741,7 +789,12 @@ impl OrderManager {
 
         if order.status == OrderStatus::Executed {
             if let Err(e) = self.record_trade(&order).await {
-                warn!(order_id = %order.id, error = %e, "Failed to record trade in trades table");
+                warn!(
+                    order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                    error = %e,
+                    "Failed to record trade in trades table"
+                );
             }
         }
 
@@ -755,16 +808,25 @@ impl OrderManager {
         Ok(())
     }
 
-    /// Insert a completed trade row into the `trades` table, including `client_order_id` (Task #39).
+    /// Insert a completed trade row into the `trades` table, including `client_order_id` (Task #39)
+    /// and `trace_id` for distributed log correlation (Task #31).
     /// Non-fatal: callers log the error and continue.
     async fn record_trade(&self, order: &Order) -> Result<(), OrderError> {
         let amount_sol = order.amount as f64 / 1_000_000_000.0;
+        info!(
+            order_id = %order.id,
+            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+            mint = %order.mint,
+            side = %order.side,
+            amount_sol = amount_sol,
+            "Recording executed trade"
+        );
         sqlx::query(
             r#"
             INSERT INTO trades (
                 id, mint, side, amount_sol, price, status, strategy,
-                signature, slippage_bps, created_at, executed_at, client_order_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                signature, slippage_bps, created_at, executed_at, client_order_id, trace_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -780,6 +842,7 @@ impl OrderManager {
         .bind(order.created_at)
         .bind(order.executed_at)
         .bind(order.client_order_id)
+        .bind(&order.trace_id)
         .execute(&self.db_pool.pool)
         .await?;
         Ok(())
@@ -928,6 +991,7 @@ impl OrderManager {
                     if auto_snipe {
                         // Route through submit_order so the DecisionEngine gates the order
                         // before it enters the queue — consistent with all other order ingestion paths.
+                        let sniper_trace_id = uuid::Uuid::new_v4().to_string();
                         let order = super::Order {
                             id: uuid::Uuid::new_v4().to_string(),
                             mint: event.mint.clone(),
@@ -950,10 +1014,21 @@ impl OrderManager {
                             executed_amount: None,
                             metadata: std::collections::HashMap::new(),
                             client_order_id: Some(uuid::Uuid::new_v4()),
+                            trace_id: Some(sniper_trace_id.clone()),
                         };
                         match self.submit_order(order).await {
-                            Ok(id) => info!("Sniper order {} queued for new token: {}", id, event.mint),
-                            Err(e) => warn!("Sniper order rejected for {}: {}", event.mint, e),
+                            Ok(id) => info!(
+                                order_id = %id,
+                                trace_id = %sniper_trace_id,
+                                mint = %event.mint,
+                                "Sniper order queued for new token"
+                            ),
+                            Err(e) => warn!(
+                                trace_id = %sniper_trace_id,
+                                mint = %event.mint,
+                                error = %e,
+                                "Sniper order rejected"
+                            ),
                         }
                     }
                 }
@@ -1124,7 +1199,12 @@ impl OrderManagerMinimal {
         )
         .await
         .unwrap_or_else(|_| {
-            warn!("Order {} timed out after {:?}", order.id, self.config.order_timeout);
+            warn!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                timeout_secs = self.config.order_timeout.as_secs(),
+                "Order timed out"
+            );
             Err(format!("Order timed out after {:?}", self.config.order_timeout).into())
         });
 
@@ -1143,6 +1223,7 @@ impl OrderManagerMinimal {
                     let backoff = self.config.retry_delay * 2u32.pow(order.retry_count);
                     warn!(
                         order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                         attempt = order.retry_count + 1,
                         max_attempts = self.config.max_retries + 1,
                         reason = %err_str,
@@ -1160,6 +1241,7 @@ impl OrderManagerMinimal {
                 }
                 warn!(
                     order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                     attempt = order.retry_count + 1,
                     reason = %err_str,
                     retriable = is_retriable_error(&err_str),
@@ -1227,7 +1309,11 @@ impl OrderManagerMinimal {
         let payer = self.pumpfun_client.pubkey();
         let tip_instruction = jito.create_tip_instruction(&payer, tip_lamports);
         if tip_instruction.is_none() {
-            warn!(order_id = %order.id, "No Jito tip accounts available — bundle will land without tip");
+            warn!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                "No Jito tip accounts available — bundle will land without tip"
+            );
         }
 
         // Pre-submission simulation: reject orders likely to fail on-chain before they
@@ -1248,7 +1334,11 @@ impl OrderManagerMinimal {
                 }
             };
             jito.execute_simulation_gate(&sim_tx, &order.id).await?;
-            info!(order_id = %order.id, "Pre-submission simulation passed");
+            info!(
+                order_id = %order.id,
+                trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                "Pre-submission simulation passed"
+            );
         }
 
         // Attempt Jito bundle submission — retries once on any rejection before giving up.
@@ -1257,6 +1347,7 @@ impl OrderManagerMinimal {
             if jito_attempt > 0 {
                 warn!(
                     order_id = %order.id,
+                    trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
                     jito_attempt,
                     "Jito bundle rejected, retrying after 2 s"
                 );
@@ -1278,7 +1369,12 @@ impl OrderManagerMinimal {
             let bundle_id = match jito.send_bundle(vec![trade_tx]).await {
                 Ok(id) => id,
                 Err(e) => {
-                    warn!(order_id = %order.id, jito_attempt, reason = %e, tip_lamports, "Jito send_bundle error (treated as rejection)");
+                    warn!(
+                        order_id = %order.id,
+                        trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                        jito_attempt, reason = %e, tip_lamports,
+                        "Jito send_bundle error (treated as rejection)"
+                    );
                     continue; // will sleep 2 s at the start of the next iteration (or exit loop)
                 }
             };
@@ -1288,7 +1384,12 @@ impl OrderManagerMinimal {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 match jito.get_bundle_status(&bundle_id).await {
                     Ok(status) if status == "confirmed" || status == "finalized" => {
-                        info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, "Jito bundle landed");
+                        info!(
+                            order_id = %order.id,
+                            trace_id = %order.trace_id.as_deref().unwrap_or("no-trace"),
+                            bundle_id = %bundle_id, jito_attempt,
+                            "Jito bundle landed"
+                        );
                         return Ok(bundle_id);
                     }
                     Ok(status) if status == "failed" => {

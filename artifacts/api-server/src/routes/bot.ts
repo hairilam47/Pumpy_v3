@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
 import { db, strategiesTable } from "@workspace/db";
 import { grpcBot } from "../lib/grpc-client";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -77,6 +78,7 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
       slippageBps?: number;
       strategyName?: string;
       clientOrderId?: string;
+      traceId?: string;
     };
 
     if (!body.tokenMint || !body.side || !body.amountSol) {
@@ -88,6 +90,19 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
     // Accept one from the caller (idempotency re-submit) or mint a fresh UUID.
     const clientOrderId = body.clientOrderId ?? randomUUID();
 
+    // Distributed tracing (Task #31): accept a caller-supplied trace_id or mint a new one.
+    const traceId = body.traceId ?? randomUUID();
+
+    logger.info({
+      event: "SubmitOrder received",
+      trace_id: traceId,
+      client_order_id: clientOrderId,
+      token_mint: body.tokenMint,
+      side: body.side,
+      amount_sol: body.amountSol,
+      strategy: body.strategyName ?? "manual",
+    });
+
     // 1. Rust gRPC
     try {
       const grpcResp = await grpcBot.submitOrder({
@@ -98,12 +113,20 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
         slippage_bps: body.slippageBps ?? 100,
         strategy_name: body.strategyName ?? "manual",
         client_order_id: clientOrderId,
+        trace_id: traceId,
+      });
+      logger.info({
+        event: "SubmitOrder forwarded to Rust engine",
+        trace_id: traceId,
+        order_id: grpcResp.order_id,
+        success: grpcResp.success,
       });
       res.json({
         orderId: grpcResp.order_id,
         success: grpcResp.success,
         message: grpcResp.message,
         clientOrderId,
+        traceId,
         source: "rust",
       });
       return;
@@ -120,10 +143,17 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
         order_type: body.orderType ?? "MARKET",
         slippage_bps: body.slippageBps ?? 100,
         strategy_name: body.strategyName ?? "manual",
+        trace_id: traceId,
       }),
     }) as Record<string, unknown> | null;
 
-    res.json(pyData ?? { success: false, orderId: "", message: "Engine not available" });
+    logger.info({
+      event: "SubmitOrder forwarded to Python fallback",
+      trace_id: traceId,
+      success: !!(pyData as Record<string, unknown> | null)?.success,
+    });
+
+    res.json(pyData ?? { success: false, orderId: "", message: "Engine not available", traceId });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Invalid request";
     res.status(400).json({ error: msg });

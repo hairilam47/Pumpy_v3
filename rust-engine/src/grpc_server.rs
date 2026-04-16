@@ -294,6 +294,7 @@ impl Bot for BotService {
             executed_price: None,
             executed_amount: None,
             client_order_id,
+            trace_id: Some(trace_id.clone()),
         };
 
         match self.order_manager.submit_order(order).await {

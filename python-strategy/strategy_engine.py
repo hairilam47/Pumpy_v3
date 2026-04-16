@@ -373,6 +373,7 @@ class StrategyEngine:
             return
 
         client_order_id = str(uuid.uuid4())
+        trace_id = str(uuid.uuid4())
         logger.info(
             "Executing signal",
             strategy=signal.strategy_name,
@@ -382,6 +383,7 @@ class StrategyEngine:
             confidence=signal.confidence,
             reason=signal.reason,
             client_order_id=client_order_id,
+            trace_id=trace_id,
         )
 
         amount_lamports = int(signal.amount_sol * 1_000_000_000)
@@ -395,6 +397,7 @@ class StrategyEngine:
             strategy_name=signal.strategy_name,
             metadata=signal.metadata,
             client_order_id=client_order_id,
+            trace_id=trace_id,
         )
 
         if result.get("success"):
@@ -404,6 +407,7 @@ class StrategyEngine:
                 "Order submitted",
                 order_id=result.get("order_id"),
                 client_order_id=client_order_id,
+                trace_id=trace_id,
                 strategy=signal.strategy_name,
             )
             asyncio.create_task(
@@ -416,6 +420,7 @@ class StrategyEngine:
                 "Order submission failed",
                 reason=result.get("message"),
                 client_order_id=client_order_id,
+                trace_id=trace_id,
                 strategy=signal.strategy_name,
             )
 

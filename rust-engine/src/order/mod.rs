@@ -33,6 +33,8 @@ pub struct Order {
     pub executed_amount: Option<u64>,
     /// Stable client-assigned UUID for idempotency tracking (Task #26)
     pub client_order_id: Option<Uuid>,
+    /// Distributed trace ID propagated from the originating service (Task #31)
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

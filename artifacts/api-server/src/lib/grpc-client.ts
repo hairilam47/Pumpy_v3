@@ -63,6 +63,7 @@ export interface SubmitOrderRequest {
   min_sol_output?: number;
   metadata?: Record<string, string>;
   client_order_id?: string;
+  trace_id?: string;
 }
 
 export interface SubmitOrderResponse {

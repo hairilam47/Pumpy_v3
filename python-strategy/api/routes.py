@@ -22,6 +22,7 @@ class OrderRequest(BaseModel):
     order_type: str = "MARKET"
     slippage_bps: int = 100
     strategy_name: str = "manual"
+    trace_id: Optional[str] = None
 
 
 class StrategyConfigUpdate(BaseModel):
@@ -84,7 +85,17 @@ async def update_strategy(
 @router.post("/orders")
 async def submit_manual_order(order: OrderRequest, engine=Depends(get_engine)):
     """Manually submit an order via the Rust engine."""
+    import uuid as _uuid
+    trace_id = order.trace_id or str(_uuid.uuid4())
     amount_lamports = int(order.amount_sol * 1_000_000_000)
+    logger.info(
+        "Manual order submitted",
+        token_mint=order.token_mint,
+        side=order.side,
+        amount_sol=order.amount_sol,
+        strategy=order.strategy_name,
+        trace_id=trace_id,
+    )
     result = await engine.grpc_client.submit_order(
         token_mint=order.token_mint,
         side=order.side.upper(),
@@ -92,6 +103,7 @@ async def submit_manual_order(order: OrderRequest, engine=Depends(get_engine)):
         order_type=order.order_type,
         slippage_bps=order.slippage_bps,
         strategy_name=order.strategy_name,
+        trace_id=trace_id,
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Order failed"))
