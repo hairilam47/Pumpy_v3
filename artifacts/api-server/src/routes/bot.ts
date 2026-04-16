@@ -419,6 +419,45 @@ router.get("/bot/status", async (_req: Request, res: Response) => {
   }
 });
 
+// ─── Backtest ─────────────────────────────────────────────────────────────────
+
+// POST /api/bot/backtest  →  proxy to Python FastAPI backtest endpoint
+router.post("/bot/backtest", async (req: Request, res: Response) => {
+  try {
+    const body = req.body as {
+      strategy_name?: string;
+      token_mints?: string[];
+      days?: number;
+      initial_sol?: number;
+      buy_amount_sol?: number;
+      stop_loss_pct?: number;
+      take_profit_pct?: number;
+      min_liquidity_sol?: number;
+    };
+
+    if (!body.strategy_name) {
+      res.status(400).json({ error: "Missing required field: strategy_name" });
+      return;
+    }
+
+    const pyData = await fetchPython("/api/backtest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }) as Record<string, unknown> | null;
+
+    if (!pyData) {
+      res.status(503).json({ error: "Python strategy engine not available" });
+      return;
+    }
+
+    res.json(pyData);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Backtest request failed";
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ─── MEV Stats ───────────────────────────────────────────────────────────────
 
 router.get("/bot/mev-stats", async (_req: Request, res: Response) => {

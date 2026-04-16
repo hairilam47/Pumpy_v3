@@ -139,12 +139,39 @@ async def get_tracked_tokens(engine=Depends(get_engine)):
 
 
 @router.get("/metrics")
-async def get_metrics(engine=Depends(get_engine)):
+async def get_metrics(request: Request, engine=Depends(get_engine)):
     """
-    Aggregate performance metrics including Sharpe ratio, max drawdown, and volatility.
-    Consumed by the dashboard via the Express API server.
+    Aggregate performance metrics including Sharpe ratio, max drawdown (%), and volatility.
+    PnL series is sourced from persisted trades in the Express API so metrics survive restarts.
     """
-    return engine.get_metrics()
+    from strategy_engine import _compute_advanced_metrics
+
+    base = engine.get_metrics()
+
+    # Fetch persisted trade PnL from the Express API (DB-backed) to override in-memory
+    # pnl_history which only accumulates from the current process session.
+    try:
+        express_url = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{express_url}/api/bot/trades?limit=500",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    # Trades arrive newest-first (DESC order). Reverse to chronological
+                    # so sequence-dependent metrics (max drawdown) are computed correctly.
+                    db_pnl = [
+                        float(t["pnlSol"])
+                        for t in reversed(trades if isinstance(trades, list) else [])
+                        if t.get("pnlSol") is not None
+                    ]
+                    if len(db_pnl) >= 2:
+                        base.update(_compute_advanced_metrics(db_pnl))
+    except Exception:
+        pass
+
+    return base
 
 
 class BacktestRequest(BaseModel):
@@ -152,99 +179,180 @@ class BacktestRequest(BaseModel):
     token_mints: Optional[List[str]] = None
     days: int = 7
     initial_sol: float = 10.0
+    buy_amount_sol: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    min_liquidity_sol: Optional[float] = None
 
 
 @router.post("/backtest")
 async def run_backtest(body: BacktestRequest, engine=Depends(get_engine)):
     """
-    Run a simplified historical backtest simulation against tracked-token price histories.
-    Uses the same rule-based signal generator as live trading.
-    Returns: equity curve, total return, Sharpe ratio, max drawdown, win rate, trade count.
+    Run a historical backtest simulation.
+
+    Data source (in priority order):
+      1. Persistent token_metrics rows fetched from Express API (filtered by `days`)
+      2. In-memory price_history from engine.tracked_tokens (fallback when DB is empty)
+
+    Config overrides (buy_amount_sol, stop_loss_pct, take_profit_pct, min_liquidity_sol) are
+    applied via an isolated dict — live strategy instances are NEVER mutated.
+
+    Signal heuristic is strategy-specific:
+      - sniper:   buy when bonding_curve_progress <= 30 and positive 1-bar return
+      - momentum: buy when 5-bar slope is positive (short MA > long MA proxy)
+      - default:  buy on any positive short-term momentum
+
+    Returns: equity curve, total return, Sharpe ratio, max drawdown (%), win rate, trade count.
     """
-    import math
-    import random
+    from strategy_engine import _compute_advanced_metrics
+    from collections import defaultdict
 
     strategy = next((s for s in engine.strategies if s.name == body.strategy_name), None)
     if strategy is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{body.strategy_name}' not found")
 
-    target_mints = set(body.token_mints or list(engine.tracked_tokens.keys())[:5])
+    # Build isolated config — never mutates the live strategy
+    cfg: Dict[str, Any] = {
+        "buy_amount_sol": body.buy_amount_sol if body.buy_amount_sol is not None else getattr(strategy, "buy_amount_sol", 0.1),
+        "stop_loss_pct": body.stop_loss_pct if body.stop_loss_pct is not None else getattr(strategy, "stop_loss_pct", None),
+        "take_profit_pct": body.take_profit_pct if body.take_profit_pct is not None else getattr(strategy, "take_profit_pct", None),
+        "min_liquidity_sol": body.min_liquidity_sol if body.min_liquidity_sol is not None else getattr(strategy, "min_liquidity_sol", 0.0),
+    }
+
+    # ── 1. Fetch historical rows from the token_metrics DB table ──────────────
+    # Build per-mint time-ordered price series from persistent snapshots.
+    express_url = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
+    db_price_series: Dict[str, List[float]] = defaultdict(list)
+    db_meta: Dict[str, Dict] = {}
+
+    try:
+        params = f"days={body.days}&limit=5000"
+        if body.token_mints:
+            for m in body.token_mints[:10]:
+                params += f"&mint={m}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{express_url}/api/token-metrics?{params}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    rows = await resp.json()
+                    if isinstance(rows, list):
+                        # Rows are returned newest-first; reverse to get chronological order
+                        for row in reversed(rows):
+                            mint = row.get("mint")
+                            price = row.get("price")
+                            if mint and price and price > 0:
+                                db_price_series[mint].append(float(price))
+                                if mint not in db_meta:
+                                    db_meta[mint] = {
+                                        "liquidity_sol": row.get("liquiditySol", 0.0) or 0.0,
+                                        "bonding_curve_progress": row.get("bondingCurveProgress", 50.0) or 50.0,
+                                    }
+    except Exception as exc:
+        logger.debug("Backtest: could not fetch token_metrics from DB", error=str(exc))
+
+    # ── 2. Fall back to in-memory price_history if DB returned nothing ────────
+    if not db_price_series:
+        for mint, token in list(engine.tracked_tokens.items())[:10]:
+            if token.price_history and len(token.price_history) >= 4:
+                db_price_series[mint] = list(token.price_history)
+                db_meta[mint] = {
+                    "liquidity_sol": token.liquidity_sol,
+                    "bonding_curve_progress": token.bonding_curve_progress,
+                }
+
+    # ── 3. Filter to requested mints ─────────────────────────────────────────
+    if body.token_mints:
+        target = set(body.token_mints)
+        db_price_series = {m: v for m, v in db_price_series.items() if m in target}
+
     sol = body.initial_sol
     equity_curve: List[float] = [sol]
     pnl_series: List[float] = []
     wins = 0
     trades = 0
 
-    # Replay price histories
-    for mint, token in engine.tracked_tokens.items():
-        if mint not in target_mints:
-            continue
-        history = token.price_history
+    # ── 4. Strategy-specific signal heuristic ────────────────────────────────
+    def _should_enter(mint: str, history: List[float], i: int) -> bool:
+        """Return True if the strategy would signal BUY at position i."""
+        if history[i - 1] <= 0:
+            return False
+        meta = db_meta.get(mint, {})
+        liq = meta.get("liquidity_sol", 0.0)
+        bc = meta.get("bonding_curve_progress", 50.0)
+
+        if liq < cfg["min_liquidity_sol"]:
+            return False
+
+        if body.strategy_name == "sniper":
+            # Sniper enters on fresh early-stage tokens with upward momentum
+            if bc > 30:
+                return False
+            lookback = history[max(0, i - 3):i]
+            return len(lookback) >= 2 and lookback[-1] > lookback[0]
+
+        elif body.strategy_name == "momentum":
+            # Momentum enters when short MA > long MA (proxy for trend)
+            short = history[max(0, i - 5):i]
+            long_ = history[max(0, i - 20):i]
+            if len(short) < 2:
+                return False
+            short_ma = sum(short) / len(short)
+            long_ma = sum(long_) / len(long_)
+            return short_ma > long_ma
+
+        else:
+            # Generic: positive momentum over last 5 bars
+            lookback = history[max(0, i - 5):i]
+            return len(lookback) >= 2 and lookback[-1] > lookback[0]
+
+    # ── 5. Replay each token's price series ──────────────────────────────────
+    for mint, history in db_price_series.items():
         if len(history) < 4:
             continue
-        # Slide a window of 20 prices through history
-        for i in range(20, len(history)):
-            window = history[max(0, i - 20):i]
-            if len(window) < 3:
+        for i in range(1, len(history)):
+            if not _should_enter(mint, history, i):
                 continue
-            signal_obj = await strategy.analyze(token)
-            if signal_obj is None:
+            entry_price = history[i - 1]
+            exit_price = history[i]
+            if entry_price <= 0:
                 continue
-            if signal_obj.side == "BUY":
-                entry_price = history[i - 1]
-                if i < len(history):
-                    exit_price = history[i]
-                else:
-                    continue
-                if entry_price <= 0:
-                    continue
-                return_pct = (exit_price - entry_price) / entry_price
-                trade_sol = getattr(strategy, "buy_amount_sol", 0.1)
-                pnl = trade_sol * return_pct
-                sol += pnl
-                pnl_series.append(pnl)
-                trades += 1
-                if pnl > 0:
-                    wins += 1
-                equity_curve.append(round(sol, 6))
+            return_pct = (exit_price - entry_price) / entry_price
+            if cfg["stop_loss_pct"] is not None:
+                return_pct = max(return_pct, -cfg["stop_loss_pct"] / 100.0)
+            if cfg["take_profit_pct"] is not None:
+                return_pct = min(return_pct, cfg["take_profit_pct"] / 100.0)
+            pnl = cfg["buy_amount_sol"] * return_pct
+            sol += pnl
+            pnl_series.append(pnl)
+            trades += 1
+            if pnl > 0:
+                wins += 1
+            equity_curve.append(round(sol, 6))
 
-    # Compute advanced metrics
+    # ── 6. Compute advanced metrics ───────────────────────────────────────────
     win_rate = (wins / trades * 100.0) if trades > 0 else 0.0
     total_return_pct = (sol - body.initial_sol) / body.initial_sol * 100.0
-
-    n = len(pnl_series)
-    sharpe = 0.0
-    max_dd = 0.0
-    volatility = 0.0
-    if n >= 2:
-        mean = sum(pnl_series) / n
-        variance = sum((x - mean) ** 2 for x in pnl_series) / (n - 1)
-        std = math.sqrt(variance) if variance > 0 else 1e-9
-        volatility = std
-        sharpe = (mean / std) * math.sqrt(288 * 365)
-        cum = 0.0
-        peak = 0.0
-        for p in pnl_series:
-            cum += p
-            if cum > peak:
-                peak = cum
-            dd = peak - cum
-            if dd > max_dd:
-                max_dd = dd
+    advanced = _compute_advanced_metrics(pnl_series)
 
     return {
         "strategy": body.strategy_name,
         "days": body.days,
         "initial_sol": body.initial_sol,
         "final_sol": round(sol, 6),
+        "simulated_pnl_sol": round(sol - body.initial_sol, 6),
         "total_return_pct": round(total_return_pct, 4),
         "total_trades": trades,
         "wins": wins,
         "win_rate": round(win_rate, 2),
-        "sharpe_ratio": round(sharpe, 4),
-        "max_drawdown_sol": round(max_dd, 6),
-        "volatility_sol": round(volatility, 6),
+        "sharpe_ratio": advanced["sharpe_ratio"],
+        "max_drawdown_pct": advanced["max_drawdown_pct"],
+        "volatility": advanced["volatility"],
         "equity_curve": equity_curve[-200:],
+        "data_source": "db" if db_meta and any(
+            mint in db_meta for mint in db_price_series
+        ) else "in_memory",
     }
 
 

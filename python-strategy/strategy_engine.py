@@ -49,14 +49,14 @@ PRESET_REFRESH_CYCLES = 12
 
 def _compute_advanced_metrics(pnl_series: List[float]) -> Dict:
     """
-    Compute Sharpe ratio, max drawdown, and volatility from a list of per-trade PnL values (in SOL).
+    Compute Sharpe ratio, max drawdown (%), and volatility from per-trade PnL values (SOL).
     Returns zeroed dict when insufficient data.
     """
     if not pnl_series or len(pnl_series) < 2:
         return {
             "sharpe_ratio": 0.0,
-            "max_drawdown_sol": 0.0,
-            "volatility_sol": 0.0,
+            "max_drawdown_pct": 0.0,
+            "volatility": 0.0,
         }
 
     n = len(pnl_series)
@@ -68,22 +68,24 @@ def _compute_advanced_metrics(pnl_series: List[float]) -> Dict:
     annualization = math.sqrt(288 * 365)
     sharpe = (mean / std) * annualization
 
-    # Max drawdown: peak-to-trough on cumulative PnL curve
-    cumulative = 0.0
-    peak = 0.0
-    max_dd = 0.0
+    # Max drawdown as percentage of peak cumulative equity
+    # Equity starts at 1.0 (normalised) so percentage is meaningful even without initial_sol
+    equity = 1.0
+    peak = 1.0
+    max_dd_pct = 0.0
     for p in pnl_series:
-        cumulative += p
-        if cumulative > peak:
-            peak = cumulative
-        dd = peak - cumulative
-        if dd > max_dd:
-            max_dd = dd
+        equity += p
+        if equity > peak:
+            peak = equity
+        if peak > 0:
+            dd_pct = (peak - equity) / peak * 100.0
+            if dd_pct > max_dd_pct:
+                max_dd_pct = dd_pct
 
     return {
         "sharpe_ratio": round(sharpe, 4),
-        "max_drawdown_sol": round(max_dd, 6),
-        "volatility_sol": round(std, 6),
+        "max_drawdown_pct": round(max_dd_pct, 4),
+        "volatility": round(std, 6),
     }
 
 
@@ -132,6 +134,7 @@ class StrategyEngine:
 
         self._express_api = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
         self._wallet_id: str = "wallet_001"
+        self._snapshot_task: Optional[asyncio.Task] = None
 
     async def start(self):
         logger.info("Starting strategy engine")
@@ -147,6 +150,7 @@ class StrategyEngine:
 
         self._scan_task = asyncio.create_task(self._market_scan_loop())
         self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
+        self._snapshot_task = asyncio.create_task(self._token_snapshot_loop())
         await self.data_collector.start()
 
         logger.info("Strategy engine started", strategies=[s.name for s in self.strategies])
@@ -160,6 +164,9 @@ class StrategyEngine:
 
         if self._checkpoint_task:
             self._checkpoint_task.cancel()
+
+        if self._snapshot_task:
+            self._snapshot_task.cancel()
 
         # Final buffer flush before exit
         self._flush_checkpoints()
@@ -198,6 +205,54 @@ class StrategyEngine:
                 break
             except Exception as exc:
                 logger.warning("Checkpoint loop error", error=str(exc))
+
+    async def _token_snapshot_loop(self):
+        """
+        Background task: every 60 seconds write a price snapshot for each tracked token
+        to the Express API's /api/token-metrics endpoint so the backtest endpoint has
+        persistent historical data to replay.
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(60)
+                if not self.running or not self.tracked_tokens:
+                    continue
+                snapshots = [
+                    {
+                        "mint": t.mint,
+                        "price": t.price,
+                        "liquidity_sol": t.liquidity_sol,
+                        "market_cap_sol": t.market_cap_sol,
+                        "volume_24h_sol": t.volume_24h_sol,
+                        "holder_count": t.holder_count,
+                        "bonding_curve_progress": t.bonding_curve_progress,
+                    }
+                    for t in self.tracked_tokens.values()
+                    if t.price > 0
+                ]
+                if snapshots:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            f"{self._express_api}/api/token-metrics",
+                            json={"snapshots": snapshots},
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as resp:
+                            if resp.status not in (200, 201):
+                                logger.debug(
+                                    "Token snapshot write failed",
+                                    status=resp.status,
+                                    count=len(snapshots),
+                                )
+                            else:
+                                logger.debug(
+                                    "Token snapshots written",
+                                    count=len(snapshots),
+                                )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.debug("Token snapshot loop error", error=str(exc))
 
     def _apply_preset(self, preset: str) -> None:
         """Apply risk parameters from a named preset to all strategies immediately."""
@@ -351,6 +406,9 @@ class StrategyEngine:
                 client_order_id=client_order_id,
                 strategy=signal.strategy_name,
             )
+            asyncio.create_task(
+                self._record_trade_pnl(client_order_id, signal.strategy_name)
+            )
         else:
             orders_failed.labels(strategy=signal.strategy_name).inc()
             self._orders_failed_count += 1
@@ -360,6 +418,31 @@ class StrategyEngine:
                 client_order_id=client_order_id,
                 strategy=signal.strategy_name,
             )
+
+    async def _record_trade_pnl(self, client_order_id: str, strategy_name: str, delay_s: int = 5) -> None:
+        """Fetch the settled trade from Express after a short delay and record its PnL
+        on the originating strategy's in-memory pnl_history so live metrics are accurate."""
+        await asyncio.sleep(delay_s)
+        try:
+            express_url = os.environ.get("EXPRESS_API_URL", "http://localhost:8080")
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{express_url}/api/bot/trades/{client_order_id}",
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as resp:
+                    if resp.status == 200:
+                        trades = await resp.json()
+                        trade = trades[0] if isinstance(trades, list) and trades else None
+                        if trade and trade.get("pnlSol") is not None:
+                            pnl = float(trade["pnlSol"])
+                            strategy = next(
+                                (s for s in self.strategies if s.name == strategy_name), None
+                            )
+                            if strategy:
+                                strategy.record_trade_result(won=pnl >= 0, pnl_sol=pnl)
+        except Exception:
+            pass
 
     def add_token(self, token: TokenMarketData):
         self.tracked_tokens[token.mint] = token

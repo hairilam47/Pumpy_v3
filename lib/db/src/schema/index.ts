@@ -5,3 +5,4 @@ export * from "./system-config";
 export * from "./wallet-config";
 export * from "./wallet-registry";
 export * from "./wallet-alerts";
+export * from "./token-metrics";

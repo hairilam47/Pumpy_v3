@@ -45,6 +45,7 @@ class BaseStrategy(ABC):
         self.trades_executed = 0
         self.trades_won = 0
         self.total_pnl = 0.0
+        self.pnl_history: List[float] = []
         self.logger = structlog.get_logger(f"strategy.{name}")
 
     @abstractmethod
@@ -63,6 +64,9 @@ class BaseStrategy(ABC):
         if won:
             self.trades_won += 1
         self.total_pnl += pnl_sol
+        self.pnl_history.append(pnl_sol)
+        if len(self.pnl_history) > 1000:
+            self.pnl_history = self.pnl_history[-1000:]
 
     @property
     def win_rate(self) -> float:

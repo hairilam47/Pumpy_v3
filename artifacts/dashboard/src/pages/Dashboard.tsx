@@ -358,7 +358,7 @@ export default function DashboardPage() {
               <TrendingDown className="w-3.5 h-3.5 text-red-400" />
             </div>
             <span className="text-base sm:text-xl font-bold tabular-nums text-red-400">
-              {Number(pyMetrics.max_drawdown_sol ?? 0).toFixed(4)} SOL
+              {Number(pyMetrics.max_drawdown_pct ?? 0).toFixed(2)}%
             </span>
             <div className="text-[10px] text-muted-foreground mt-0.5">peak-to-trough</div>
           </div>
@@ -368,7 +368,7 @@ export default function DashboardPage() {
               <Activity className="w-3.5 h-3.5 text-amber-400" />
             </div>
             <span className="text-base sm:text-xl font-bold tabular-nums text-amber-400">
-              {Number(pyMetrics.volatility_sol ?? 0).toFixed(4)} SOL
+              {Number(pyMetrics.volatility ?? 0).toFixed(4)} SOL
             </span>
             <div className="text-[10px] text-muted-foreground mt-0.5">per trade σ</div>
           </div>

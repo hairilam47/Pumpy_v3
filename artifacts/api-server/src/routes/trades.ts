@@ -6,7 +6,7 @@ const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function parseLimit(raw: unknown, defaultVal = 50, max = 200): number {
+function parseLimit(raw: unknown, defaultVal = 50, max = 1000): number {
   const n = parseInt(String(raw ?? defaultVal), 10);
   return Math.min(Number.isInteger(n) && n > 0 ? n : defaultVal, max);
 }
@@ -15,7 +15,7 @@ function parseLimit(raw: unknown, defaultVal = 50, max = 200): number {
 // Supports optional query filters:
 //   ?clientOrderId=<uuid>  — exact match via trades_client_order_id_idx
 //   ?strategy=<name>       — filter by strategy name
-//   ?limit=<n>             — max rows (default 50, max 200)
+//   ?limit=<n>             — max rows (default 50, max 1000)
 
 router.get("/bot/trades", async (req: Request, res: Response) => {
   try {
