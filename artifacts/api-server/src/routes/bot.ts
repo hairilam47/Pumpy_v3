@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
-import { db, tradesTable, strategiesTable } from "@workspace/db";
-import { desc } from "drizzle-orm";
+import { db, strategiesTable } from "@workspace/db";
 import { grpcBot } from "../lib/grpc-client";
 
 const router = Router();
@@ -62,27 +61,6 @@ router.get("/bot/portfolio", async (_req: Request, res: Response) => {
     });
   } catch {
     res.status(500).json({ error: "Failed to get portfolio" });
-  }
-});
-
-// ─── Trades ───────────────────────────────────────────────────────────────────
-
-// GET /api/bot/trades  →  DB first, then mock
-router.get("/bot/trades", async (req: Request, res: Response) => {
-  try {
-    const limit = Math.min(parseInt(String(req.query.limit ?? "50")), 200);
-    const strategy = req.query.strategy as string | undefined;
-
-    try {
-      const query = db.select().from(tradesTable).orderBy(desc(tradesTable.createdAt)).limit(limit);
-      const rows = await query;
-      res.json(rows);
-      return;
-    } catch { /* fall through */ }
-
-    res.json(generateMockTrades(limit, strategy));
-  } catch {
-    res.status(500).json({ error: "Failed to list trades" });
   }
 });
 
@@ -529,29 +507,5 @@ router.post("/bot/stop", async (_req: Request, res: Response) => {
     res.json({ success: false, message: "Stop request failed" });
   }
 });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function generateMockTrades(limit: number, strategy?: string) {
-  const strategies = strategy ? [strategy] : ["sniper", "momentum", "manual"];
-  const statuses = ["Executed", "Pending", "Failed", "Executed", "Executed"];
-  const symbols = ["BONK", "WIF", "PNUT", "MOODENG", "POPCAT", "FWOG"];
-
-  return Array.from({ length: Math.min(limit, 20) }, (_, i) => ({
-    id: `trade-${i + 1}`,
-    mint: `7xKXtg${i}CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU`,
-    tokenName: `${symbols[i % symbols.length]} Token`,
-    tokenSymbol: symbols[i % symbols.length],
-    side: i % 3 === 0 ? "SELL" : "BUY",
-    amountSol: parseFloat((Math.random() * 0.5 + 0.01).toFixed(4)),
-    price: Math.random() * 0.001,
-    status: statuses[i % statuses.length],
-    strategy: strategies[i % strategies.length],
-    signature: i % 4 !== 0 ? `${i}sig3KLxHvP2mNjRdWsYcAtQfBe7GoZkCuVyi0` : null,
-    pnlSol: i % 4 === 0 ? null : parseFloat(((Math.random() - 0.4) * 0.05).toFixed(6)),
-    createdAt: new Date(Date.now() - i * 1000 * 60 * 3).toISOString(),
-    executedAt: i % 4 !== 0 ? new Date(Date.now() - i * 1000 * 60 * 3 + 2000).toISOString() : null,
-  }));
-}
 
 export default router;
