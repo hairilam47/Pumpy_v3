@@ -628,26 +628,20 @@ impl OrderManager {
             database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED").await,
         );
 
-        if sim_enabled {
-            // Build a transaction for simulation; replaceRecentBlockhash=true means
-            // blockhash staleness is handled by the sim RPC.
-            // Include the tip instruction so the simulation accounts for the SOL transfer.
-            let (sim_tx, _) = match order.side {
-                OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
-                }
-                OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
-                }
-            };
-            if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
-                warn!(
-                    order_id = %order.id,
-                    reason = %sim_err,
-                    "Pre-submission simulation failed — skipping Jito bundle"
-                );
-                return Err(format!("simulation_rejected: {}", sim_err).into());
+        // Build a transaction for simulation; include the tip instruction so the
+        // simulation accounts for the SOL transfer.
+        // execute_simulation_gate returns Err("simulation_rejected: ...") when the
+        // gate fires — the error is propagated directly and send_bundle is never reached.
+        let sim_tx = match order.side {
+            OrderSide::Buy => {
+                self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?.0
             }
+            OrderSide::Sell => {
+                self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?.0
+            }
+        };
+        jito.execute_simulation_gate(&sim_tx, sim_enabled, &order.id).await?;
+        if sim_enabled {
             info!(order_id = %order.id, "Pre-submission simulation passed");
         }
 
@@ -1175,24 +1169,18 @@ impl OrderManagerMinimal {
             database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED").await,
         );
 
-        if sim_enabled {
-            // Include the tip instruction in the simulation so SOL balance checks are accurate.
-            let (sim_tx, _) = match order.side {
-                OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
-                }
-                OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
-                }
-            };
-            if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
-                warn!(
-                    order_id = %order.id,
-                    reason = %sim_err,
-                    "Pre-submission simulation failed — skipping Jito bundle"
-                );
-                return Err(format!("simulation_rejected: {}", sim_err).into());
+        // Include the tip instruction in the simulation so SOL balance checks are accurate.
+        // execute_simulation_gate returns Err("simulation_rejected: ...") when the gate fires.
+        let sim_tx = match order.side {
+            OrderSide::Buy => {
+                self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?.0
             }
+            OrderSide::Sell => {
+                self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?.0
+            }
+        };
+        jito.execute_simulation_gate(&sim_tx, sim_enabled, &order.id).await?;
+        if sim_enabled {
             info!(order_id = %order.id, "Pre-submission simulation passed");
         }
 
