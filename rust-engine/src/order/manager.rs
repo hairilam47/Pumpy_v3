@@ -759,7 +759,6 @@ impl OrderManager {
     /// Non-fatal: callers log the error and continue.
     async fn record_trade(&self, order: &Order) -> Result<(), OrderError> {
         let amount_sol = order.amount as f64 / 1_000_000_000.0;
-        let client_order_id = order.client_order_id.map(|id| id.to_string());
         sqlx::query(
             r#"
             INSERT INTO trades (
@@ -780,7 +779,7 @@ impl OrderManager {
         .bind(order.slippage_bps as i32)
         .bind(order.created_at)
         .bind(order.executed_at)
-        .bind(client_order_id)
+        .bind(order.client_order_id)
         .execute(&self.db_pool.pool)
         .await?;
         Ok(())
@@ -1358,7 +1357,6 @@ impl OrderManagerMinimal {
     /// Non-fatal: callers log the error and continue.
     async fn record_trade(&self, order: &Order) -> Result<(), crate::order::OrderError> {
         let amount_sol = order.amount as f64 / 1_000_000_000.0;
-        let client_order_id = order.client_order_id.map(|id| id.to_string());
         sqlx::query(
             r#"
             INSERT INTO trades (
@@ -1379,7 +1377,7 @@ impl OrderManagerMinimal {
         .bind(order.slippage_bps as i32)
         .bind(order.created_at)
         .bind(order.executed_at)
-        .bind(client_order_id)
+        .bind(order.client_order_id)
         .execute(&self.db_pool.pool)
         .await?;
         Ok(())

@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { randomUUID } from "crypto";
 import { db, tradesTable, strategiesTable } from "@workspace/db";
 import { desc } from "drizzle-orm";
 import { grpcBot } from "../lib/grpc-client";
@@ -97,12 +98,17 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
       orderType?: string;
       slippageBps?: number;
       strategyName?: string;
+      clientOrderId?: string;
     };
 
     if (!body.tokenMint || !body.side || !body.amountSol) {
       res.status(400).json({ error: "Missing required fields: tokenMint, side, amountSol" });
       return;
     }
+
+    // Generate client_order_id for end-to-end tracing (Task #39).
+    // Accept one from the caller (idempotency re-submit) or mint a fresh UUID.
+    const clientOrderId = body.clientOrderId ?? randomUUID();
 
     // 1. Rust gRPC
     try {
@@ -113,11 +119,13 @@ router.post("/bot/orders", async (req: Request, res: Response) => {
         amount: Math.round(body.amountSol * 1_000_000_000),
         slippage_bps: body.slippageBps ?? 100,
         strategy_name: body.strategyName ?? "manual",
+        client_order_id: clientOrderId,
       });
       res.json({
         orderId: grpcResp.order_id,
         success: grpcResp.success,
         message: grpcResp.message,
+        clientOrderId,
         source: "rust",
       });
       return;

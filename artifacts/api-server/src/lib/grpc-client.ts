@@ -62,12 +62,14 @@ export interface SubmitOrderRequest {
   max_sol_cost?: number;
   min_sol_output?: number;
   metadata?: Record<string, string>;
+  client_order_id?: string;
 }
 
 export interface SubmitOrderResponse {
   order_id: string;
   success: boolean;
   message: string;
+  client_order_id?: string;
 }
 
 export interface OrderStatusResponse {
