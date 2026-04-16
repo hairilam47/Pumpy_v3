@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useListTrades, getGetPortfolioQueryOptions, getGetBotStatusQueryOptions, getGetMetricsQueryOptions } from "@workspace/api-client-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
@@ -67,7 +68,8 @@ export default function DashboardPage() {
     refetchInterval: 10_000,
   });
 
-  const { data: tradesData } = useListTrades({ limit: 200 });
+  const { data: tradesData } = useListTrades({ limit: 500 });
+  const [chartWindow, setChartWindow] = useState<"24h" | "7d">("24h");
 
   // Advanced metrics from Python ML engine (Task #30)
   const { data: pyMetrics } = useQuery<Record<string, unknown>>({
@@ -117,19 +119,46 @@ export default function DashboardPage() {
   const ctrlPending = startBot.isPending || stopBot.isPending;
 
   const pnlChartData = (() => {
-    const hourMap: Record<string, number> = {};
     const trades = tradesData ?? [];
-    for (const t of trades) {
-      if (!t.createdAt) continue;
-      const hour = `${String(new Date(t.createdAt).getHours()).padStart(2, "0")}:00`;
-      hourMap[hour] = (hourMap[hour] ?? 0) + (t.pnlSol ?? 0);
+    const now = Date.now();
+
+    if (chartWindow === "24h") {
+      const cutoff = now - 24 * 60 * 60 * 1000;
+      const hourMap: Record<string, number> = {};
+      for (const t of trades) {
+        if (!t.createdAt) continue;
+        const d = new Date(t.createdAt);
+        if (d.getTime() < cutoff) continue;
+        const hour = `${String(d.getHours()).padStart(2, "0")}:00`;
+        hourMap[hour] = (hourMap[hour] ?? 0) + (t.pnlSol ?? 0);
+      }
+      const hours = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
+      let cumulative = 0;
+      return hours.map((h) => {
+        cumulative += hourMap[h] ?? 0;
+        return { time: h, pnl: cumulative };
+      });
+    } else {
+      const cutoff = now - 7 * 24 * 60 * 60 * 1000;
+      const dayMap: Record<string, number> = {};
+      for (const t of trades) {
+        if (!t.createdAt) continue;
+        const d = new Date(t.createdAt);
+        if (d.getTime() < cutoff) continue;
+        const day = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        dayMap[day] = (dayMap[day] ?? 0) + (t.pnlSol ?? 0);
+      }
+      const days: string[] = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now - i * 24 * 60 * 60 * 1000);
+        days.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
+      }
+      let cumulative = 0;
+      return days.map((day) => {
+        cumulative += dayMap[day] ?? 0;
+        return { time: day, pnl: cumulative };
+      });
     }
-    const hours = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
-    let cumulative = 0;
-    return hours.map((h) => {
-      cumulative += hourMap[h] ?? 0;
-      return { time: h, pnl: cumulative };
-    });
   })();
 
   const activeStrategies = status?.activeStrategies ?? [];
@@ -238,12 +267,30 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold">24h Cumulative PnL</h2>
-            <span className={cn("text-xs font-medium tabular-nums",
-              pnl >= 0 ? "text-green-400" : "text-red-400"
-            )}>
-              {formatPnl(pnl)} today
-            </span>
+            <h2 className="text-sm font-semibold">Cumulative PnL</h2>
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-md overflow-hidden border border-border text-xs">
+                {(["24h", "7d"] as const).map((w) => (
+                  <button
+                    key={w}
+                    onClick={() => setChartWindow(w)}
+                    className={cn(
+                      "px-2.5 py-1 transition-colors",
+                      chartWindow === w
+                        ? "bg-primary/20 text-primary font-medium"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {w}
+                  </button>
+                ))}
+              </div>
+              <span className={cn("text-xs font-medium tabular-nums",
+                pnl >= 0 ? "text-green-400" : "text-red-400"
+              )}>
+                {formatPnl(pnl)} today
+              </span>
+            </div>
           </div>
           <ResponsiveContainer width="100%" height={160}>
             <AreaChart data={pnlChartData}>
