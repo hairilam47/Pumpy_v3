@@ -13,19 +13,9 @@ paths = ["/api", "/dashboard", "/dashboard/", "/"]
 run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
+build = "bash scripts/build-production.sh"
+run = "node --enable-source-maps artifacts/api-server/dist/index.mjs"
 
-[services.production.build]
-args = ["bash", "scripts/build-production.sh"]
-
-[services.production.build.env]
-NODE_ENV = "production"
-
-[services.production.run]
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
-
-[services.production.run.env]
+[services.env]
 PORT = "8080"
 NODE_ENV = "production"
-
-[services.production.health.startup]
-path = "/api/healthz"
