@@ -35,28 +35,26 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-// ── Dashboard static serving (production only) ────────────────────────────────
-// The dashboard React app is built into artifacts/dashboard/dist/public during
-// the deployment build step and served directly from Express so that only one
-// port (8080) is needed — a requirement for Autoscale deployments.
-if (process.env["NODE_ENV"] === "production") {
-  // Resolve relative to the monorepo root (two levels above dist/index.mjs)
-  const dashboardDist = path.resolve(
-    __dirname,
-    "../../..",
-    "artifacts/dashboard/dist/public",
-  );
+// ── Dashboard static serving ──────────────────────────────────────────────────
+// The dashboard React app is built into artifacts/dashboard/dist/public.
+// Serve it from Express on port 8080 (the single public port) in all envs so
+// both the Replit dev preview and the deployed app resolve /dashboard correctly.
+// Resolve relative to the monorepo root (3 levels up from src/ or dist/).
+const dashboardDist = path.resolve(
+  __dirname,
+  "../../..",
+  "artifacts/dashboard/dist/public",
+);
 
-  app.use("/dashboard", express.static(dashboardDist));
+app.use("/dashboard", express.static(dashboardDist));
 
-  // SPA fallback — serve index.html for any /dashboard/* route so client-side
-  // routing inside the React app works correctly.
-  app.get(["/dashboard", "/dashboard/*"], (_req, res) => {
-    res.sendFile(path.join(dashboardDist, "index.html"));
-  });
+// SPA fallback — serve index.html for any /dashboard/* route so client-side
+// routing inside the React app works correctly.
+app.get(["/dashboard", "/dashboard/{*path}"], (_req, res) => {
+  res.sendFile(path.join(dashboardDist, "index.html"));
+});
 
-  // Redirect bare root to the dashboard so the published URL is immediately useful.
-  app.get("/", (_req, res) => res.redirect(301, "/dashboard/"));
-}
+// Redirect bare root to the dashboard so the app URL is immediately useful.
+app.get("/", (_req, res) => res.redirect(301, "/dashboard/"));
 
 export default app;
