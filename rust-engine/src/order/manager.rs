@@ -103,6 +103,30 @@ pub struct OrderEvent {
     pub executed_amount: Option<u64>,
 }
 
+/// Run the Jito simulation gate and, if it passes, submit a bundle.
+///
+/// Mirrors the exact pattern used by `execute_via_jito` /
+/// `execute_via_jito_minimal`.  Extracted as a `pub(crate)` function so
+/// tests can call the real logic rather than a duplicate helper.
+///
+/// When `sim_enabled` is false the gate is skipped entirely (matching
+/// `JITO_SIMULATION_ENABLED=false`).  When no sim RPC URL is configured
+/// `execute_simulation_gate` returns `Ok(())` immediately.  On gate
+/// failure the function returns `Err("simulation_rejected: …")` without
+/// touching the bundle endpoint.
+pub(crate) async fn jito_gate_then_send(
+    jito: &crate::mev::jito::JitoClient,
+    sim_tx: &solana_sdk::transaction::Transaction,
+    bundle_txs: Vec<solana_sdk::transaction::Transaction>,
+    sim_enabled: bool,
+    order_id: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if sim_enabled {
+        jito.execute_simulation_gate(sim_tx, order_id).await?;
+    }
+    jito.send_bundle(bundle_txs).await
+}
+
 impl OrderManager {
     pub fn new(
         db_pool: DatabasePool,
@@ -537,6 +561,11 @@ impl OrderManager {
                         self.metrics.jito_bundles_landed.inc();
                         info!(order_id = %order.id, sig = %sig, "executed via Jito bundle");
                         return Ok(sig);
+                    }
+                    Err(e) if e.to_string().starts_with("simulation_rejected:") => {
+                        // Simulation hard-rejected this transaction — it would fail on-chain
+                        // regardless of submission path.  Do NOT fall back to direct RPC.
+                        return Err(e);
                     }
                     Err(e) => {
                         warn!(
@@ -1040,6 +1069,10 @@ impl OrderManagerMinimal {
                                 self.metrics.jito_bundles_landed.inc();
                                 Ok(sig)
                             }
+                            Err(e) if e.to_string().starts_with("simulation_rejected:") => {
+                                // Hard rejection — do not attempt direct RPC for an invalid transaction.
+                                Err(e)
+                            }
                             Err(e) => {
                                 warn!("Jito bundle failed for order {}: {}. Falling back to RPC.", order.id, e);
                                 self.execute_direct(&mint, &order, max_cost, min_output).await
@@ -1339,28 +1372,17 @@ mod tests {
         format!("http://{}", addr)
     }
 
-    // Replicates the manager's exact gate pattern: if sim_enabled { gate()? } send_bundle()
-    async fn sim_gate_then_bundle(
-        jito: &JitoClient,
-        tx: solana_sdk::transaction::Transaction,
-        sim_enabled: bool,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if sim_enabled {
-            jito.execute_simulation_gate(&tx, "order-test").await?;
-        }
-        jito.send_bundle(vec![tx]).await
-    }
-
-    // sim fails → execute_simulation_gate returns Err("simulation_rejected:") → send_bundle not reached
+    // sim fails → jito_gate_then_send returns Err("simulation_rejected:") → bundle not reached
     #[tokio::test]
     async fn test_manager_sim_failure_blocks_bundle() {
         const SIM_FAIL: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":{"InstructionError":[0,"InvalidAccountData"]},"logs":[]}}}"#;
         const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_x"}"#;
         let bundle_called = Arc::new(AtomicBool::new(false));
+        let tx = dummy_tx();
         let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await)
             .with_sim_rpc(mock_sim_rpc(SIM_FAIL).await);
 
-        let result = sim_gate_then_bundle(&jito, dummy_tx(), true).await;
+        let result = super::jito_gate_then_send(&jito, &tx, vec![dummy_tx()], true, "ord-1").await;
 
         assert!(result.unwrap_err().to_string().starts_with("simulation_rejected:"));
         assert!(!bundle_called.load(Ordering::SeqCst));
@@ -1371,11 +1393,11 @@ mod tests {
     async fn test_manager_sim_disabled_proceeds_to_bundle() {
         const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_y"}"#;
         let bundle_called = Arc::new(AtomicBool::new(false));
-        // sim_rpc is unreachable; confirms gate is not contacted when disabled
+        let tx = dummy_tx();
         let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await)
             .with_sim_rpc("http://127.0.0.1:1/unreachable".to_string());
 
-        let result = sim_gate_then_bundle(&jito, dummy_tx(), false).await;
+        let result = super::jito_gate_then_send(&jito, &tx, vec![dummy_tx()], false, "ord-2").await;
 
         assert_eq!(result.unwrap(), "bundle_y");
         assert!(bundle_called.load(Ordering::SeqCst));
@@ -1386,9 +1408,10 @@ mod tests {
     async fn test_manager_no_sim_rpc_proceeds_to_bundle() {
         const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_z"}"#;
         let bundle_called = Arc::new(AtomicBool::new(false));
+        let tx = dummy_tx();
         let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await);
 
-        let result = sim_gate_then_bundle(&jito, dummy_tx(), true).await;
+        let result = super::jito_gate_then_send(&jito, &tx, vec![dummy_tx()], true, "ord-3").await;
 
         assert_eq!(result.unwrap(), "bundle_z");
         assert!(bundle_called.load(Ordering::SeqCst));
