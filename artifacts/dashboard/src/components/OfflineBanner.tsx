@@ -3,9 +3,8 @@ import { WifiOff, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const WS_URL = (() => {
-  const base = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}${base}/api/bot/stream`;
+  return `${proto}//${location.host}/api/bot/stream`;
 })();
 
 const RECONNECT_DELAY_MS = 5_000;

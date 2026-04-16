@@ -182,10 +182,22 @@ function startSingletonStream() {
 // ── WebSocket server ──────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
 
+const WS_PING_INTERVAL_MS = 20_000;
+
 wss.on("connection", (ws: WebSocket, subscribedOrderIds: string[]) => {
   logger.info({ subscribedOrderIds }, "WS client connected to /api/bot/stream");
 
   let filterIds = new Set<string>(subscribedOrderIds);
+
+  // Keepalive: ping every 20 s so the Replit proxy never silently drops the
+  // connection due to inactivity. Terminate clients that miss a pong.
+  let isAlive = true;
+  ws.on("pong", () => { isAlive = true; });
+  const pingTimer = setInterval(() => {
+    if (!isAlive) { ws.terminate(); return; }
+    isAlive = false;
+    ws.ping();
+  }, WS_PING_INTERVAL_MS);
 
   const onOrder = (payload: LiveTradePayload) => {
     if (ws.readyState !== ws.OPEN) return;
@@ -206,6 +218,7 @@ wss.on("connection", (ws: WebSocket, subscribedOrderIds: string[]) => {
   });
 
   ws.on("close", () => {
+    clearInterval(pingTimer);
     orderEmitter.off("order", onOrder);
     logger.info("WS client disconnected from /api/bot/stream");
   });
