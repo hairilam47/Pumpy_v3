@@ -6,6 +6,11 @@ const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function parseLimit(raw: unknown, defaultVal = 50, max = 200): number {
+  const n = parseInt(String(raw ?? defaultVal), 10);
+  return Math.min(Number.isInteger(n) && n > 0 ? n : defaultVal, max);
+}
+
 // ─── GET /api/bot/trades ─────────────────────────────────────────────────────
 // Supports optional query filters:
 //   ?clientOrderId=<uuid>  — exact match via trades_client_order_id_idx
@@ -14,7 +19,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.get("/bot/trades", async (req: Request, res: Response) => {
   try {
-    const limit = Math.min(parseInt(String(req.query.limit ?? "50")), 200);
+    const limit = parseLimit(req.query.limit);
     const strategy = req.query.strategy as string | undefined;
     const clientOrderId = req.query.clientOrderId as string | undefined;
 
@@ -41,7 +46,9 @@ router.get("/bot/trades", async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/bot/trades/:clientOrderId ──────────────────────────────────────
-// Look up a single trade by its client_order_id.
+// Look up all trades linked to a given client_order_id.
+// Returns an array — normally one entry (one trade per finalized order) but
+// an array is returned to be safe if retries or splits create multiple rows.
 // Uses the trades_client_order_id_idx partial index for efficient lookup.
 
 router.get("/bot/trades/:clientOrderId", async (req: Request, res: Response) => {
@@ -57,14 +64,14 @@ router.get("/bot/trades/:clientOrderId", async (req: Request, res: Response) => 
       .select()
       .from(tradesTable)
       .where(eq(tradesTable.clientOrderId, clientOrderId as string))
-      .limit(1);
+      .orderBy(desc(tradesTable.createdAt));
 
     if (rows.length === 0) {
       res.status(404).json({ error: "Trade not found" });
       return;
     }
 
-    res.json(rows[0]);
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ error: "Failed to look up trade" });
   }
