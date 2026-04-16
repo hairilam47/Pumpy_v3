@@ -338,12 +338,12 @@ function StrategyPresetCard() {
     onSuccess: (_data, { preset, key }) => {
       toast({ title: `Strategy preset set to ${preset}` });
       void qc.invalidateQueries({ queryKey: ["activePreset"] });
-      setPendingPreset(null);
-      if (rememberKey) {
-        rememberAdminKey(key);
-      } else {
-        clearAdminKey();
+      if (pendingPreset) {
+        // Explicit prompt: honor the "Remember" checkbox
+        if (rememberKey) { rememberAdminKey(key); } else { clearAdminKey(); }
       }
+      // Auto-applied (no prompt): leave cache TTL intact — key stays remembered
+      setPendingPreset(null);
     },
     onError: (err: Error) => {
       toast({ title: "Failed to save preset", description: err.message, variant: "destructive" });

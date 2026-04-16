@@ -109,12 +109,12 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
     },
     onSuccess: (_data, key) => {
       toast({ title: `Wallet ${wallet.walletId} resumed` });
-      setShowKeyPrompt(false);
-      if (rememberKey) {
-        rememberAdminKey(key);
-      } else {
-        clearAdminKey();
+      if (showKeyPrompt) {
+        // Explicit prompt: honor the "Remember" checkbox
+        if (rememberKey) { rememberAdminKey(key); } else { clearAdminKey(); }
       }
+      // Auto-applied (no prompt): leave cache TTL intact — key stays remembered
+      setShowKeyPrompt(false);
       void qc.invalidateQueries({ queryKey: ["wallets"] });
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },

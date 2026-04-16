@@ -117,12 +117,12 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
     },
     onSuccess: (_data, { preset, key }) => {
       toast({ title: `Preset changed to ${preset} for ${wallet.walletId}` });
-      setPendingPreset(null);
-      if (rememberKey) {
-        rememberAdminKey(key);
-      } else {
-        clearAdminKey();
+      if (pendingPreset) {
+        // Explicit prompt: honor the "Remember" checkbox
+        if (rememberKey) { rememberAdminKey(key); } else { clearAdminKey(); }
       }
+      // Auto-applied (no prompt): leave cache TTL intact — key stays remembered
+      setPendingPreset(null);
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
     onError: (err: Error) => {
