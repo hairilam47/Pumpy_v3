@@ -262,11 +262,6 @@ mod tests {
     use super::*;
     use solana_sdk::{hash::Hash, signature::Keypair, signer::Signer, system_instruction};
 
-    // ─── helpers ──────────────────────────────────────────────────────────────
-
-    /// Build a minimal signed transaction that serialises without error.
-    /// The blockhash is `Hash::default()` (all-zeros) which is invalid on-chain
-    /// but perfectly fine for testing serialisation and HTTP round-trips.
     fn dummy_signed_tx() -> solana_sdk::transaction::Transaction {
         let payer = Keypair::new();
         let ix = system_instruction::transfer(&payer.pubkey(), &payer.pubkey(), 0);
@@ -278,12 +273,7 @@ mod tests {
         )
     }
 
-    /// Spawn a one-shot HTTP/1.1 server on an OS-assigned port.
-    ///
-    /// The server accepts **one** connection, discards the request body, and
-    /// writes `response_json` as the HTTP response body before closing. This
-    /// is sufficient for `reqwest` to parse the JSON without a keep-alive loop.
-    async fn spawn_mock_rpc(response_json: &'static str) -> String {
+    pub(super) async fn spawn_mock_rpc(response_json: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -302,191 +292,46 @@ mod tests {
         format!("http://{}", addr)
     }
 
-    // ─── Case 1 ───────────────────────────────────────────────────────────────
-    // No sim RPC URL configured → simulate_transaction returns Ok(()) immediately
-    // without making any network request.  This is the behaviour when the engine
-    // is run with a single RPC (no dedicated simulation node).
-
     #[tokio::test]
     async fn test_sim_no_rpc_url_returns_ok() {
         let jito = JitoClient::new("http://127.0.0.1:1/unreachable".to_string());
-        // No .with_sim_rpc() call → sim_rpc_url is None
-        let result = jito.simulate_transaction(&dummy_signed_tx()).await;
-        assert!(
-            result.is_ok(),
-            "Expected Ok(()) when no sim RPC URL is configured, got: {:?}",
-            result.err()
-        );
+        assert!(jito.simulate_transaction(&dummy_signed_tx()).await.is_ok());
     }
-
-    // ─── Case 2 ───────────────────────────────────────────────────────────────
-    // Sim RPC returns a transaction-level error → simulate_transaction returns
-    // Err whose message starts with "simulation failed:", matching the prefix
-    // the caller uses to set the simulation_rejected: order error.
 
     #[tokio::test]
     async fn test_sim_rpc_tx_error_is_rejected_with_correct_prefix() {
-        // RPC response that carries a transaction-level simulation error.
-        const ERR_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":{"InstructionError":[0,"InvalidAccountData"]},"logs":[]}}}"#;
-        let url = spawn_mock_rpc(ERR_BODY).await;
-
+        const BODY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":{"InstructionError":[0,"InvalidAccountData"]},"logs":[]}}}"#;
         let jito = JitoClient::new("http://127.0.0.1:1/unreachable".to_string())
-            .with_sim_rpc(url);
-
-        let result = jito.simulate_transaction(&dummy_signed_tx()).await;
-        assert!(result.is_err(), "Expected Err when simulation returns a tx error");
-        let msg = result.unwrap_err();
-        assert!(
-            msg.starts_with("simulation failed:"),
-            "Error prefix mismatch — got: {msg}"
-        );
+            .with_sim_rpc(spawn_mock_rpc(BODY).await);
+        let err = jito.simulate_transaction(&dummy_signed_tx()).await.unwrap_err();
+        assert!(err.starts_with("simulation failed:"), "got: {err}");
     }
-
-    // ─── Case 3 ───────────────────────────────────────────────────────────────
-    // Sim RPC returns a successful simulation (null err) → simulate_transaction
-    // returns Ok(()) and execution proceeds.
 
     #[tokio::test]
     async fn test_sim_rpc_success_returns_ok() {
-        const OK_BODY: &str =
-            r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":null,"logs":[]}}}"#;
-        let url = spawn_mock_rpc(OK_BODY).await;
-
+        const BODY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":null,"logs":[]}}}"#;
         let jito = JitoClient::new("http://127.0.0.1:1/unreachable".to_string())
-            .with_sim_rpc(url);
-
-        let result = jito.simulate_transaction(&dummy_signed_tx()).await;
-        assert!(
-            result.is_ok(),
-            "Expected Ok(()) when simulation passes, got: {:?}",
-            result.err()
-        );
+            .with_sim_rpc(spawn_mock_rpc(BODY).await);
+        assert!(jito.simulate_transaction(&dummy_signed_tx()).await.is_ok());
     }
-
-    // ─── Case 4 ───────────────────────────────────────────────────────────────
-    // sim_enabled_from_str covers the JITO_SIMULATION_ENABLED=false bypass path.
-    // In the manager, when this returns false the sim block is skipped entirely
-    // and simulate_transaction is never called (so a broken sim RPC is harmless).
 
     #[test]
     fn test_sim_enabled_from_str_covers_all_cases() {
-        // Absent key → enabled (safe default: always simulate when configured)
-        assert!(JitoClient::sim_enabled_from_str(None), "None should default to enabled");
-        // Truthy strings → enabled
+        assert!(JitoClient::sim_enabled_from_str(None));
         assert!(JitoClient::sim_enabled_from_str(Some("true".into())));
         assert!(JitoClient::sim_enabled_from_str(Some("1".into())));
-        // Explicit opt-out values → disabled (JITO_SIMULATION_ENABLED=false bypasses sim)
         assert!(!JitoClient::sim_enabled_from_str(Some("false".into())));
         assert!(!JitoClient::sim_enabled_from_str(Some("0".into())));
-        // Empty or unrecognised → treated as enabled (conservative)
         assert!(JitoClient::sim_enabled_from_str(Some("".into())));
         assert!(JitoClient::sim_enabled_from_str(Some("yes".into())));
     }
 
-    // ─── Case 5 ───────────────────────────────────────────────────────────────
-    // Sim RPC returns an RPC-level error (wrong method, auth failure) →
-    // simulate_transaction returns Err with "simulation RPC error:" prefix.
-
     #[tokio::test]
     async fn test_sim_rpc_level_error_is_rejected() {
-        const RPC_ERR_BODY: &str =
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
-        let url = spawn_mock_rpc(RPC_ERR_BODY).await;
-
+        const BODY: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
         let jito = JitoClient::new("http://127.0.0.1:1/unreachable".to_string())
-            .with_sim_rpc(url);
-
-        let result = jito.simulate_transaction(&dummy_signed_tx()).await;
-        assert!(result.is_err(), "Expected Err when RPC returns an error object");
-        let msg = result.unwrap_err();
-        assert!(
-            msg.starts_with("simulation RPC error:"),
-            "Error prefix mismatch — got: {msg}"
-        );
-    }
-
-    // Integration tests: gate → conditional bundle-send, matching the manager pattern:
-    //   if sim_enabled { gate()? }   send_bundle()
-
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-
-    async fn spawn_mock_bundle_server(response: &'static str, called: Arc<AtomicBool>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                called.store(true, Ordering::SeqCst);
-                let mut buf = vec![0u8; 8192];
-                let _ = stream.read(&mut buf).await;
-                let body = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response.len(), response,
-                );
-                let _ = stream.write_all(body.as_bytes()).await;
-            }
-        });
-        format!("http://{}", addr)
-    }
-
-    // Mirrors the actual manager pattern:  if sim_enabled { gate()? }  send_bundle()
-    async fn gate_then_bundle(
-        jito: &JitoClient,
-        tx: solana_sdk::transaction::Transaction,
-        sim_enabled: bool,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if sim_enabled {
-            jito.execute_simulation_gate(&tx, "test-order").await?;
-        }
-        jito.send_bundle(vec![tx]).await
-    }
-
-    // Simulation fails → Err("simulation_rejected:") returned, send_bundle not called.
-    #[tokio::test]
-    async fn test_gate_blocks_bundle_on_simulation_failure() {
-        const SIM_ERR: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":{"InstructionError":[0,"InvalidAccountData"]},"logs":[]}}}"#;
-        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_abc123"}"#;
-
-        let sim_url = spawn_mock_rpc(SIM_ERR).await;
-        let bundle_called = Arc::new(AtomicBool::new(false));
-        let bundle_url = spawn_mock_bundle_server(BUNDLE_OK, Arc::clone(&bundle_called)).await;
-
-        let jito = JitoClient::new(bundle_url).with_sim_rpc(sim_url);
-        let result = gate_then_bundle(&jito, dummy_signed_tx(), true).await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().starts_with("simulation_rejected:"));
-        assert!(!bundle_called.load(Ordering::SeqCst), "send_bundle must not be called on rejection");
-    }
-
-    // JITO_SIMULATION_ENABLED=false → gate block skipped, send_bundle called.
-    #[tokio::test]
-    async fn test_gate_bypassed_when_sim_disabled() {
-        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_disabled_sim"}"#;
-
-        let bundle_called = Arc::new(AtomicBool::new(false));
-        let bundle_url = spawn_mock_bundle_server(BUNDLE_OK, Arc::clone(&bundle_called)).await;
-        // sim_rpc points at unreachable host — would fail if gate were not skipped.
-        let jito = JitoClient::new(bundle_url).with_sim_rpc("http://127.0.0.1:1/unreachable".to_string());
-
-        let result = gate_then_bundle(&jito, dummy_signed_tx(), false).await;
-
-        assert_eq!(result.unwrap(), "bundle_disabled_sim");
-        assert!(bundle_called.load(Ordering::SeqCst), "send_bundle must be called when sim disabled");
-    }
-
-    // No sim RPC URL configured → gate returns Ok() immediately, send_bundle called.
-    #[tokio::test]
-    async fn test_gate_passes_with_no_sim_rpc_url() {
-        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_no_sim_rpc"}"#;
-
-        let bundle_called = Arc::new(AtomicBool::new(false));
-        let bundle_url = spawn_mock_bundle_server(BUNDLE_OK, Arc::clone(&bundle_called)).await;
-        let jito = JitoClient::new(bundle_url); // no .with_sim_rpc()
-
-        let result = gate_then_bundle(&jito, dummy_signed_tx(), true).await;
-
-        assert_eq!(result.unwrap(), "bundle_no_sim_rpc");
-        assert!(bundle_called.load(Ordering::SeqCst), "send_bundle must be called when no sim RPC URL");
+            .with_sim_rpc(spawn_mock_rpc(BODY).await);
+        let err = jito.simulate_transaction(&dummy_signed_tx()).await.unwrap_err();
+        assert!(err.starts_with("simulation RPC error:"), "got: {err}");
     }
 }

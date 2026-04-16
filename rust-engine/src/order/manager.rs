@@ -1289,3 +1289,108 @@ pub struct PortfolioSummary {
     pub open_positions_count: u32,
     pub win_rate: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::mev::jito::JitoClient;
+    use solana_sdk::{hash::Hash, signature::Keypair, signer::Signer, system_instruction};
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    fn dummy_tx() -> solana_sdk::transaction::Transaction {
+        let payer = Keypair::new();
+        let ix = system_instruction::transfer(&payer.pubkey(), &payer.pubkey(), 0);
+        solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[ix], Some(&payer.pubkey()), &[&payer], Hash::default(),
+        )
+    }
+
+    async fn mock_sim_rpc(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body);
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    async fn mock_bundle_endpoint(body: &'static str, called: Arc<AtomicBool>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                called.store(true, Ordering::SeqCst);
+                let mut buf = vec![0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body);
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    // Replicates the manager's exact gate pattern: if sim_enabled { gate()? } send_bundle()
+    async fn sim_gate_then_bundle(
+        jito: &JitoClient,
+        tx: solana_sdk::transaction::Transaction,
+        sim_enabled: bool,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if sim_enabled {
+            jito.execute_simulation_gate(&tx, "order-test").await?;
+        }
+        jito.send_bundle(vec![tx]).await
+    }
+
+    // sim fails → execute_simulation_gate returns Err("simulation_rejected:") → send_bundle not reached
+    #[tokio::test]
+    async fn test_manager_sim_failure_blocks_bundle() {
+        const SIM_FAIL: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"value":{"err":{"InstructionError":[0,"InvalidAccountData"]},"logs":[]}}}"#;
+        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_x"}"#;
+        let bundle_called = Arc::new(AtomicBool::new(false));
+        let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await)
+            .with_sim_rpc(mock_sim_rpc(SIM_FAIL).await);
+
+        let result = sim_gate_then_bundle(&jito, dummy_tx(), true).await;
+
+        assert!(result.unwrap_err().to_string().starts_with("simulation_rejected:"));
+        assert!(!bundle_called.load(Ordering::SeqCst));
+    }
+
+    // JITO_SIMULATION_ENABLED=false → gate block skipped → send_bundle called
+    #[tokio::test]
+    async fn test_manager_sim_disabled_proceeds_to_bundle() {
+        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_y"}"#;
+        let bundle_called = Arc::new(AtomicBool::new(false));
+        // sim_rpc is unreachable; confirms gate is not contacted when disabled
+        let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await)
+            .with_sim_rpc("http://127.0.0.1:1/unreachable".to_string());
+
+        let result = sim_gate_then_bundle(&jito, dummy_tx(), false).await;
+
+        assert_eq!(result.unwrap(), "bundle_y");
+        assert!(bundle_called.load(Ordering::SeqCst));
+    }
+
+    // No sim RPC configured → gate returns Ok() immediately → send_bundle called
+    #[tokio::test]
+    async fn test_manager_no_sim_rpc_proceeds_to_bundle() {
+        const BUNDLE_OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":"bundle_z"}"#;
+        let bundle_called = Arc::new(AtomicBool::new(false));
+        let jito = JitoClient::new(mock_bundle_endpoint(BUNDLE_OK, Arc::clone(&bundle_called)).await);
+
+        let result = sim_gate_then_bundle(&jito, dummy_tx(), true).await;
+
+        assert_eq!(result.unwrap(), "bundle_z");
+        assert!(bundle_called.load(Ordering::SeqCst));
+    }
+}
