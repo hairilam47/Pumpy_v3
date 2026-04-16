@@ -8,6 +8,7 @@ use tracing::{info, warn, error};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
+    instruction::Instruction,
     signer::keypair::Keypair,
     pubkey::Pubkey,
     signer::Signer,
@@ -273,6 +274,94 @@ impl PumpFunClient {
         let recent_blockhash = client.get_latest_blockhash().await?;
         let tx = Transaction::new_signed_with_payer(
             &[ix],
+            Some(&seller),
+            &[&*self.keypair],
+            recent_blockhash,
+        );
+
+        Ok((tx, recent_blockhash))
+    }
+
+    /// Build a buy transaction that includes an optional Jito tip instruction.
+    ///
+    /// When `tip_instruction` is `Some`, the tip transfer is appended after the
+    /// trade instruction so Jito can collect it from the same signed transaction.
+    pub async fn build_buy_transaction_with_tip(
+        &self,
+        mint: &Pubkey,
+        amount: u64,
+        max_sol_cost: u64,
+        tip_instruction: Option<Instruction>,
+    ) -> Result<(Transaction, solana_sdk::hash::Hash), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.rpc_manager.get_client().await?;
+        let buyer = self.keypair.pubkey();
+
+        let (bonding_curve, _) = derive_bonding_curve_pda(mint);
+        let associated_bonding_curve = get_associated_token_address(&bonding_curve, mint);
+        let associated_user = get_associated_token_address(&buyer, mint);
+
+        let trade_ix = build_buy_instruction(
+            &buyer,
+            mint,
+            &bonding_curve,
+            &associated_bonding_curve,
+            &associated_user,
+            amount,
+            max_sol_cost,
+        );
+
+        let mut instructions = vec![trade_ix];
+        if let Some(tip_ix) = tip_instruction {
+            instructions.push(tip_ix);
+        }
+
+        let recent_blockhash = client.get_latest_blockhash().await?;
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&buyer),
+            &[&*self.keypair],
+            recent_blockhash,
+        );
+
+        Ok((tx, recent_blockhash))
+    }
+
+    /// Build a sell transaction that includes an optional Jito tip instruction.
+    ///
+    /// When `tip_instruction` is `Some`, the tip transfer is appended after the
+    /// trade instruction so Jito can collect it from the same signed transaction.
+    pub async fn build_sell_transaction_with_tip(
+        &self,
+        mint: &Pubkey,
+        amount: u64,
+        min_sol_output: u64,
+        tip_instruction: Option<Instruction>,
+    ) -> Result<(Transaction, solana_sdk::hash::Hash), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.rpc_manager.get_client().await?;
+        let seller = self.keypair.pubkey();
+
+        let (bonding_curve, _) = derive_bonding_curve_pda(mint);
+        let associated_bonding_curve = get_associated_token_address(&bonding_curve, mint);
+        let associated_user = get_associated_token_address(&seller, mint);
+
+        let trade_ix = build_sell_instruction(
+            &seller,
+            mint,
+            &bonding_curve,
+            &associated_bonding_curve,
+            &associated_user,
+            amount,
+            min_sol_output,
+        );
+
+        let mut instructions = vec![trade_ix];
+        if let Some(tip_ix) = tip_instruction {
+            instructions.push(tip_ix);
+        }
+
+        let recent_blockhash = client.get_latest_blockhash().await?;
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
             Some(&seller),
             &[&*self.keypair],
             recent_blockhash,

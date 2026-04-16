@@ -613,6 +613,14 @@ impl OrderManager {
             .unwrap_or(10_000_000);
         let tip_lamports = JitoClient::compute_dynamic_tip(order.amount, tip_percent, tip_floor, tip_ceiling);
 
+        // Build the tip instruction once — a randomly-selected Jito tip account is chosen
+        // here and reused for every attempt so all retries target the same account.
+        let payer = self.pumpfun_client.pubkey();
+        let tip_instruction = jito.create_tip_instruction(&payer, tip_lamports);
+        if tip_instruction.is_none() {
+            warn!(order_id = %order.id, "No Jito tip accounts available — bundle will land without tip");
+        }
+
         // Pre-submission simulation: reject orders likely to fail on-chain before they
         // consume a Jito bundle slot. Simulation failure is not transient so we do not
         // retry — run it once before the submission retry loop.
@@ -624,12 +632,13 @@ impl OrderManager {
         if sim_enabled {
             // Build a transaction for simulation; replaceRecentBlockhash=true means
             // blockhash staleness is handled by the sim RPC.
+            // Include the tip instruction so the simulation accounts for the SOL transfer.
             let (sim_tx, _) = match order.side {
                 OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
                 }
                 OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
                 }
             };
             if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
@@ -656,12 +665,14 @@ impl OrderManager {
             }
 
             // Rebuild the transaction each attempt to obtain a fresh blockhash.
+            // The tip instruction is cloned from the one created above so the same
+            // tip account is used across retries.
             let (trade_tx, _blockhash) = match order.side {
                 OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
                 }
                 OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
                 }
             };
 
@@ -674,7 +685,7 @@ impl OrderManager {
                 }
             };
 
-            info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, tip_lamports, "Jito bundle submitted");
+            info!(order_id = %order.id, bundle_id = %bundle_id, jito_attempt, tip_lamports, "Jito bundle submitted (tip instruction included)");
 
             // Poll for bundle status (up to 5 seconds).
             let mut bundle_failed = false;
@@ -1150,6 +1161,14 @@ impl OrderManagerMinimal {
             .unwrap_or(10_000_000);
         let tip_lamports = JitoClient::compute_dynamic_tip(order.amount, tip_percent, tip_floor, tip_ceiling);
 
+        // Build the tip instruction once — a randomly-selected Jito tip account is chosen
+        // here and reused for every attempt so all retries target the same account.
+        let payer = self.pumpfun_client.pubkey();
+        let tip_instruction = jito.create_tip_instruction(&payer, tip_lamports);
+        if tip_instruction.is_none() {
+            warn!(order_id = %order.id, "No Jito tip accounts available — bundle will land without tip");
+        }
+
         // Pre-submission simulation: reject orders likely to fail on-chain before they
         // consume a Jito bundle slot. Simulation failure is not transient so we run
         // it once before the retry loop.
@@ -1159,12 +1178,13 @@ impl OrderManagerMinimal {
             .unwrap_or(true);
 
         if sim_enabled {
+            // Include the tip instruction in the simulation so SOL balance checks are accurate.
             let (sim_tx, _) = match order.side {
                 OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
                 }
                 OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
                 }
             };
             if let Err(sim_err) = jito.simulate_transaction(&sim_tx).await {
@@ -1191,12 +1211,13 @@ impl OrderManagerMinimal {
             }
 
             // Rebuild the transaction each attempt to obtain a fresh blockhash.
+            // Tip instruction is cloned from the one created above (same tip account).
             let (trade_tx, _blockhash) = match order.side {
                 OrderSide::Buy => {
-                    self.pumpfun_client.build_buy_transaction(mint, order.amount, max_cost).await?
+                    self.pumpfun_client.build_buy_transaction_with_tip(mint, order.amount, max_cost, tip_instruction.clone()).await?
                 }
                 OrderSide::Sell => {
-                    self.pumpfun_client.build_sell_transaction(mint, order.amount, min_output).await?
+                    self.pumpfun_client.build_sell_transaction_with_tip(mint, order.amount, min_output, tip_instruction.clone()).await?
                 }
             };
 
@@ -1204,7 +1225,7 @@ impl OrderManagerMinimal {
             let bundle_id = match jito.send_bundle(vec![trade_tx]).await {
                 Ok(id) => id,
                 Err(e) => {
-                    warn!(order_id = %order.id, jito_attempt, reason = %e, "Jito send_bundle error (treated as rejection)");
+                    warn!(order_id = %order.id, jito_attempt, reason = %e, tip_lamports, "Jito send_bundle error (treated as rejection)");
                     continue; // will sleep 2 s at the start of the next iteration (or exit loop)
                 }
             };
