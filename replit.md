@@ -8,11 +8,19 @@ A Pump.fun Solana trading bot with four components:
 3. **Express API Server** — REST + WebSocket bridge (port 8080)
 4. **React Monitoring Dashboard** — real-time trade feed, portfolio metrics, strategy configurator
 
-Source: https://github.com/hairilam47/PumpyPumpyFunBotTrade
+Source: https://github.com/hairilam47/Pumpy_v3
 
 ## Architecture
 
-Dashboard (port 23183, Vite) → Express API Server (port 8080) → Python FastAPI (port 8001) → Rust gRPC (port 50051)
+**Development**: Dashboard (port 23183, Vite dev) → Express API Server (port 8080) → Python FastAPI (port 8001) → Rust gRPC (port 50051). Each service runs in its own workflow.
+
+**Production (Autoscale)**: Everything consolidates onto a single port (8080).
+- Express serves the React dashboard's static build (`artifacts/dashboard/dist/public`) at `/dashboard/`.
+- Express also serves `/api/*` routes and the WebSocket fan-out at `/api/bot/stream`.
+- Bare `/` issues a 301 redirect to `/dashboard/`.
+- The Python strategy engine is spawned as a child process by Express on startup when `NODE_ENV=production`.
+- The Rust gRPC engine remains a separate service and is reached via `RUST_GRPC_URL`.
+- Run command: `pnpm --filter @workspace/api-server run start` (set in Deployments UI). Build command: `bash scripts/build-production.sh`. `deploymentTarget = "vm"` in `artifacts/api-server/.replit-artifact/artifact.toml`.
 
 ## Stack
 
@@ -73,6 +81,8 @@ Three-state (CLOSED → OPEN → HALF_OPEN → CLOSED):
 
 `artifacts/api-server/src/index.ts` maintains a **singleton gRPC StreamOrders call** at server startup. All WebSocket clients subscribe to an `EventEmitter` (`orderEmitter`) instead of opening their own gRPC connections. Each client can optionally filter by `order_id` sets. Auto-reconnects on gRPC stream failure.
 
+**Keepalive**: Each connected WS client receives a ping every 20 s (`WS_PING_INTERVAL_MS`). Clients that miss a pong are terminated via `ws.terminate()`. This prevents the Replit proxy from silently dropping idle connections after its ~30 s inactivity timeout. The interval is cleared in the `ws.on("close")` handler to avoid leaks.
+
 ## Advanced Metrics (Task #30)
 
 Python engine exposes per `/api/metrics`:
@@ -98,7 +108,7 @@ Python engine exposes per `/api/metrics`:
 - `artifacts/dashboard/src/hooks/use-admin-key.ts` — **admin key session cache** (1-hour TTL via sessionStorage)
 - `artifacts/dashboard/src/components/LiveTradesFeed.tsx` — real-time trade table with status badges
 - `artifacts/dashboard/src/components/MevStatsPanel.tsx` — Jito bundle stats panel
-- `artifacts/dashboard/src/components/OfflineBanner.tsx` — **offline WS banner** (amber fixed banner when API server unreachable, auto-reconnects every 5s)
+- `artifacts/dashboard/src/components/OfflineBanner.tsx` — **offline WS banner** (amber fixed banner when API server unreachable, auto-reconnects every 5 s on close). Probe URL is `wss://host/api/bot/stream` (no `BASE_URL` prefix — that path is mounted at the host root, not under `/dashboard/`). Server-side ping/pong keeps the connection alive, so there is no client-side periodic re-probe.
 
 ## Database Schema
 
@@ -133,6 +143,12 @@ Python engine exposes per `/api/metrics`:
 - **Tier 1 (Replit Secrets — read-only in UI)**: `WALLET_PRIVATE_KEY`, `KEYPAIR_PATH`, `DATABASE_URL`
 - **Tier 2 (DB-backed — editable in Settings page)**: `SOLANA_RPC_URL`, `SOLANA_RPC_URLS`, `JITO_BUNDLE_URL`, `JITO_TIP_PERCENT`, `JITO_TIP_FLOOR`, `JITO_TIP_CEILING`, `MAX_POSITION_SIZE_SOL`, `STOP_LOSS_PERCENT`, `TAKE_PROFIT_PERCENT`, `RUST_GRPC_URL`, `PYTHON_STRATEGY_URL`
 - DB values take precedence over env vars. Rust engine reads DB config at startup. A restart is required for Rust to pick up changes.
+
+## Deployment Build
+
+`artifacts/api-server/build.mjs` (esbuild) bundles the Express app into `dist/index.mjs`. Pure-JS gRPC packages — `@grpc/grpc-js`, `@grpc/proto-loader`, and `protobufjs` — must NOT appear in the externals list, otherwise the production run container crashes with `ERR_MODULE_NOT_FOUND` (the deployment image excludes `node_modules`). Only genuinely native modules (`*.node`, `sharp`, `bcrypt`, etc.) belong in externals. Bundle size is ~2.8 MB.
+
+`scripts/build-production.sh` runs the API-server bundle build and the dashboard Vite build (with required `PORT` and `BASE_PATH` env vars) so both `dist` directories land in the deployment image. `.replitignore` keeps `node_modules`, `rust-engine/target/`, and other build caches out of the image, but explicitly does NOT exclude the two `dist` directories.
 
 ## Important Config
 
