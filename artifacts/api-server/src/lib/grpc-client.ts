@@ -69,7 +69,6 @@ export interface SubmitOrderResponse {
   order_id: string;
   success: boolean;
   message: string;
-  client_order_id?: string;
 }
 
 export interface OrderStatusResponse {
