@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+echo "==> Installing Node.js dependencies..."
+pnpm install --frozen-lockfile
+
 echo "==> Installing Python dependencies..."
 pip install -r python-strategy/requirements.txt --quiet --no-warn-script-location
 

@@ -1,0 +1,36 @@
+# ── Rust build artifacts (primary offender: ~6 GB) ────────────────────────────
+# The target/ directory is compiled output — never needed in the image.
+rust-engine/target/
+
+# ── Git history ───────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Node.js dependencies (reinstalled via pnpm install during build) ──────────
+**/node_modules/
+**/.pnpm-store/
+.pnpm-store/
+
+# ── Python caches ─────────────────────────────────────────────────────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+python-strategy/.venv/
+
+# ── Existing build outputs (regenerated during deployment build) ───────────────
+artifacts/dashboard/dist/
+artifacts/api-server/dist/
+artifacts/mockup-sandbox/dist/
+
+# ── Development / local tooling ───────────────────────────────────────────────
+.local/
+.cache/
+tmp/
+**/.DS_Store
+**/*.log
+**/*.swp
+
+# ── Replit dev artifacts ──────────────────────────────────────────────────────
+.upm/
+**/*.edit.toml
