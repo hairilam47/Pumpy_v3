@@ -16,19 +16,19 @@ _FATAL_GRPC_CODES = frozenset({
     grpc.StatusCode.INTERNAL,
 })
 
-# Circuit-breaker thresholds
-_CB_FAILURE_THRESHOLD = 5
-_CB_RECOVERY_INTERVAL = 30.0
-
 
 class CircuitBreaker:
     """
     Simple three-state circuit breaker (CLOSED → OPEN → HALF_OPEN → CLOSED).
+    Thresholds are read from application settings so they can be tuned via env vars.
     Thread-safe because the asyncio event loop is single-threaded.
     """
 
-    def __init__(self, failure_threshold: int = _CB_FAILURE_THRESHOLD,
-                 recovery_interval: float = _CB_RECOVERY_INTERVAL):
+    def __init__(self, failure_threshold: Optional[int] = None,
+                 recovery_interval: Optional[float] = None):
+        from config import settings as _settings
+        failure_threshold = failure_threshold if failure_threshold is not None else _settings.cb_failure_threshold
+        recovery_interval = recovery_interval if recovery_interval is not None else _settings.cb_recovery_interval_seconds
         self._failure_threshold = failure_threshold
         self._recovery_interval = recovery_interval
         self._failures = 0

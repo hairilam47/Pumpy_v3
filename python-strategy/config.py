@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     momentum_window_seconds: int = Field(default=300)
 
     # ML model settings
-    ml_model_path: str = Field(default="models/signal_model.pkl")
+    ml_model_path: str = Field(default="models/signal_model.joblib")
     ml_confidence_threshold: float = Field(default=0.65)
     ml_feature_window: int = Field(default=50)
 
@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     # Polling intervals
     market_scan_interval_seconds: int = Field(default=5)
     position_update_interval_seconds: int = Field(default=10)
+
+    # Circuit breaker
+    cb_failure_threshold: int = Field(default=5)
+    cb_recovery_interval_seconds: float = Field(default=30.0)
+
+    # ML model persistence
+    ml_save_interval_seconds: float = Field(default=300.0)
+
+    # Rolling buffer checkpointing
+    buffer_checkpoint_interval_seconds: float = Field(default=300.0)
+    buffer_checkpoint_dir: str = Field(default="checkpoints")
 
     class Config:
         env_file = ".env"

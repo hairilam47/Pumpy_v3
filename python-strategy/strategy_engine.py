@@ -118,6 +118,7 @@ class StrategyEngine:
         self.tracked_tokens: Dict[str, TokenMarketData] = {}
         self.running = False
         self._scan_task: Optional[asyncio.Task] = None
+        self._checkpoint_task: Optional[asyncio.Task] = None
         self.data_collector = PumpFunDataCollector(self.grpc_client)
         self.data_collector.register_callback(self._on_token_event)
 
@@ -145,6 +146,7 @@ class StrategyEngine:
         await self._refresh_preset_from_wallet_config()
 
         self._scan_task = asyncio.create_task(self._market_scan_loop())
+        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
         await self.data_collector.start()
 
         logger.info("Strategy engine started", strategies=[s.name for s in self.strategies])
@@ -156,9 +158,46 @@ class StrategyEngine:
         if self._scan_task:
             self._scan_task.cancel()
 
+        if self._checkpoint_task:
+            self._checkpoint_task.cancel()
+
+        # Final buffer flush before exit
+        self._flush_checkpoints()
+
         await self.data_collector.stop()
         await self.grpc_client.disconnect()
         logger.info("Strategy engine stopped")
+
+    def _flush_checkpoints(self) -> None:
+        """Persist all strategy rolling buffers and ML models immediately (best-effort)."""
+        from strategies.momentum import MomentumStrategy
+        for strategy in self.strategies:
+            if isinstance(strategy, MomentumStrategy):
+                strategy.save_buffers()
+            if hasattr(strategy, "ml_generator"):
+                strategy.ml_generator.maybe_checkpoint()
+
+    async def _checkpoint_loop(self):
+        """
+        Background task: periodically checkpoint rolling buffers and ML models.
+        Interval is driven by `buffer_checkpoint_interval_seconds` in settings.
+        """
+        interval = settings.buffer_checkpoint_interval_seconds
+        while self.running:
+            try:
+                await asyncio.sleep(interval)
+                if not self.running:
+                    break
+                from strategies.momentum import MomentumStrategy
+                for strategy in self.strategies:
+                    if isinstance(strategy, MomentumStrategy):
+                        strategy.maybe_checkpoint_buffers()
+                    if hasattr(strategy, "ml_generator"):
+                        strategy.ml_generator.maybe_checkpoint()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Checkpoint loop error", error=str(exc))
 
     def _apply_preset(self, preset: str) -> None:
         """Apply risk parameters from a named preset to all strategies immediately."""
@@ -264,6 +303,20 @@ class StrategyEngine:
                     logger.error("Strategy error", strategy=strategy.name, error=str(e))
 
     async def _execute_signal(self, signal: TradeSignal):
+        # Guard: if the circuit breaker is open, pause order submission
+        # and log clearly so operators know why no orders are going out.
+        if self.grpc_client.circuit_open:
+            logger.warning(
+                "Order submission suspended — circuit breaker is OPEN",
+                strategy=signal.strategy_name,
+                side=signal.side,
+                token=signal.token_mint[:8] + "...",
+                circuit_state=self.grpc_client.circuit_state,
+            )
+            orders_failed.labels(strategy=signal.strategy_name).inc()
+            self._orders_failed_count += 1
+            return
+
         client_order_id = str(uuid.uuid4())
         logger.info(
             "Executing signal",

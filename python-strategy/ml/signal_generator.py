@@ -114,30 +114,54 @@ class FeatureExtractor:
 class MLSignalGenerator:
     """ML-based signal generator using scikit-learn Random Forest."""
 
-    def __init__(self, model_path: str = "models/signal_model.joblib"):
+    def __init__(self, model_path: str = "models/signal_model.joblib",
+                 save_interval_seconds: Optional[float] = None):
         self.model_path = model_path
         self._legacy_path = model_path.replace(".joblib", ".pkl")
         self.model = None
         self.feature_extractor = FeatureExtractor()
         self._lock = threading.Lock()
         self._last_saved: Optional[float] = None
+        self._last_checkpoint: Optional[float] = None
+
+        if save_interval_seconds is not None:
+            self._save_interval = save_interval_seconds
+        else:
+            try:
+                from config import settings as _settings
+                self._save_interval = _settings.ml_save_interval_seconds
+            except Exception:
+                self._save_interval = 300.0
+
         self._try_load_model()
 
     def _try_load_model(self):
-        """Try to load a pre-trained model (joblib first, pickle fallback), or use rule-based fallback."""
+        """
+        Try to load a pre-trained model from disk, falling back to rule-based signals.
+
+        Load strategy (consistent with _persist_model):
+        - When joblib is available, always use joblib.load() regardless of file extension.
+          joblib.dump() writes a joblib-compressed format that is NOT reliably readable
+          by pickle.load(), so we must use the same library for both read and write.
+        - When joblib is unavailable, use pickle.load() as a fallback.
+        Legacy .pkl paths are also attempted so that models saved before the .joblib
+        rename can still be loaded.
+        """
         paths_to_try = [self.model_path, self._legacy_path]
         for path in paths_to_try:
             if not os.path.exists(path):
                 continue
             try:
-                if _JOBLIB_AVAILABLE and path.endswith(".joblib"):
+                if _JOBLIB_AVAILABLE:
                     model = joblib.load(path)
+                    backend = "joblib"
                 else:
                     import pickle
                     with open(path, "rb") as f:
                         model = pickle.load(f)
+                    backend = "pickle"
                 self.model = model
-                logger.info("ML model loaded", path=path, backend="joblib" if _JOBLIB_AVAILABLE else "pickle")
+                logger.info("ML model loaded", path=path, backend=backend)
                 return
             except Exception as e:
                 logger.warning("Failed to load ML model, trying next path", path=path, error=str(e))
@@ -337,6 +361,31 @@ class MLSignalGenerator:
             self._last_saved = time.monotonic()
         except Exception as e:
             logger.error("Failed to persist ML model", error=str(e))
+
+    def maybe_checkpoint(self) -> bool:
+        """
+        Persist the current model if the save interval has elapsed since the last save.
+        Returns True if a checkpoint was written, False otherwise.
+        Called periodically by the strategy engine so the model survives restarts
+        even between training runs.
+        """
+        if self.model is None:
+            return False
+        now = time.monotonic()
+        last = self._last_checkpoint or self._last_saved
+        if last is not None and (now - last) < self._save_interval:
+            return False
+        with self._lock:
+            if self.model is None:
+                return False
+            logger.debug(
+                "Periodic ML model checkpoint",
+                path=self.model_path,
+                interval_seconds=self._save_interval,
+            )
+            self._persist_model(self.model)
+            self._last_checkpoint = time.monotonic()
+        return True
 
     def reload_if_stale(self, max_age_seconds: float = 3600.0):
         """Reload the model from disk if it has been updated externally."""

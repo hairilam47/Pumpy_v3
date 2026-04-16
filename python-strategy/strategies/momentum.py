@@ -1,6 +1,8 @@
 from typing import Optional, Dict, List
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+import os
+import time
 import numpy as np
 import structlog
 
@@ -27,6 +29,75 @@ class MomentumStrategy(BaseStrategy):
         self.last_signal_time: Dict[str, datetime] = {}
         self.cooldown_seconds = 60
         self.buy_amount_sol = settings.momentum_buy_amount_sol
+
+        self._checkpoint_dir = settings.buffer_checkpoint_dir
+        self._checkpoint_interval = settings.buffer_checkpoint_interval_seconds
+        self._checkpoint_path = os.path.join(self._checkpoint_dir, "momentum_buffers.joblib")
+        self._last_checkpoint: Optional[float] = None
+
+        self._load_buffers()
+
+    def _load_buffers(self) -> None:
+        """Restore price/volume rolling windows from the most recent checkpoint."""
+        if not os.path.exists(self._checkpoint_path):
+            return
+        try:
+            try:
+                import joblib
+                data = joblib.load(self._checkpoint_path)
+            except ImportError:
+                import pickle
+                with open(self._checkpoint_path, "rb") as f:
+                    data = pickle.load(f)
+            for mint, vals in data.get("price_windows", {}).items():
+                self.price_windows[mint] = deque(vals, maxlen=100)
+            for mint, vals in data.get("volume_windows", {}).items():
+                self.volume_windows[mint] = deque(vals, maxlen=100)
+            token_count = len(self.price_windows)
+            logger.info(
+                "Momentum buffers restored from checkpoint",
+                path=self._checkpoint_path,
+                tokens=token_count,
+            )
+        except Exception as exc:
+            logger.warning("Failed to restore momentum buffers", path=self._checkpoint_path, error=str(exc))
+
+    def save_buffers(self) -> None:
+        """Persist price/volume rolling windows to disk so they survive restarts."""
+        try:
+            os.makedirs(self._checkpoint_dir, exist_ok=True)
+            data = {
+                "price_windows": {mint: list(buf) for mint, buf in self.price_windows.items()},
+                "volume_windows": {mint: list(buf) for mint, buf in self.volume_windows.items()},
+            }
+            try:
+                import joblib
+                joblib.dump(data, self._checkpoint_path, compress=3)
+            except ImportError:
+                import pickle
+                with open(self._checkpoint_path, "wb") as f:
+                    pickle.dump(data, f)
+            self._last_checkpoint = time.monotonic()
+            logger.debug(
+                "Momentum buffers checkpointed",
+                path=self._checkpoint_path,
+                tokens=len(data["price_windows"]),
+            )
+        except Exception as exc:
+            logger.warning("Failed to checkpoint momentum buffers", error=str(exc))
+
+    def maybe_checkpoint_buffers(self) -> bool:
+        """
+        Save buffers to disk if the checkpoint interval has elapsed.
+        Returns True if a write occurred.
+        """
+        now = time.monotonic()
+        if self._last_checkpoint is not None and (now - self._last_checkpoint) < self._checkpoint_interval:
+            return False
+        if not self.price_windows and not self.volume_windows:
+            return False
+        self.save_buffers()
+        return True
 
     def should_enter(self, token: TokenMarketData) -> bool:
         """Filter: only consider tokens with sufficient data and liquidity."""
