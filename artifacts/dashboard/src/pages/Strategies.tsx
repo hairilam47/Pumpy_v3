@@ -94,7 +94,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
   const qc = useQueryClient();
   const { data: config, isLoading } = useWalletConfig(wallet.walletId);
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
-  const [adminKey, setAdminKey] = useAdminKey();
+  const { adminKey, setAdminKey, rememberAdminKey, clearAdminKey } = useAdminKey();
   const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const activePreset = (config?.strategyPreset ?? "balanced") as PresetId;
@@ -115,15 +115,19 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
       }
       return res.json();
     },
-    onSuccess: (_data, { preset }) => {
+    onSuccess: (_data, { preset, key }) => {
       toast({ title: `Preset changed to ${preset} for ${wallet.walletId}` });
       setPendingPreset(null);
-      if (!rememberKey) setAdminKey("");
+      if (rememberKey) {
+        rememberAdminKey(key);
+      } else {
+        clearAdminKey();
+      }
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to change preset", description: err.message, variant: "destructive" });
-      setAdminKey("");
+      clearAdminKey();
       setRememberKey(false);
     },
   });
@@ -163,7 +167,11 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   key={preset.id}
                   onClick={() => {
                     if (!isActive && !pendingPreset) {
-                      setPendingPreset(preset.id);
+                      if (adminKey) {
+                        changePreset.mutate({ preset: preset.id, key: adminKey });
+                      } else {
+                        setPendingPreset(preset.id);
+                      }
                     }
                   }}
                   disabled={changePreset.isPending || !!pendingPreset}
@@ -222,7 +230,15 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
             })}
           </div>
 
-          {/* Admin key prompt — shown when a non-active preset is selected */}
+          {/* Auto-applying indicator — shown when cached key fires without a prompt */}
+          {changePreset.isPending && !pendingPreset && (
+            <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground rounded-lg bg-primary/5 px-3 py-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0 text-primary" />
+              Applying with remembered key…
+            </div>
+          )}
+
+          {/* Admin key prompt — shown when a preset is selected and no key is cached */}
           {pendingPreset && (
             <div className="mt-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 space-y-2">
               <p className="text-xs text-muted-foreground">
@@ -239,7 +255,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   onChange={(e) => setAdminKey(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && adminKey) changePreset.mutate({ preset: pendingPreset, key: adminKey });
-                    if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }
+                    if (e.key === "Escape") { setPendingPreset(null); clearAdminKey(); setRememberKey(false); }
                   }}
                   className="h-7 text-xs flex-1"
                   autoFocus
@@ -256,7 +272,7 @@ function WalletPresetCard({ wallet }: { wallet: WalletEntry }) {
                   size="sm"
                   variant="ghost"
                   className="h-7 w-7 p-0"
-                  onClick={() => { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }}
+                  onClick={() => { setPendingPreset(null); clearAdminKey(); setRememberKey(false); }}
                 >
                   <X className="w-3.5 h-3.5" />
                 </Button>

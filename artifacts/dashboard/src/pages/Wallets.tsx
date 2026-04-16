@@ -88,7 +88,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
   const qc = useQueryClient();
   const { data: config } = useWalletConfig(wallet.walletId);
   const [showKeyPrompt, setShowKeyPrompt] = useState(false);
-  const [adminKey, setAdminKey] = useAdminKey();
+  const { adminKey, setAdminKey, rememberAdminKey, clearAdminKey } = useAdminKey();
   const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const resumeMutation = useMutation({
@@ -107,10 +107,14 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
       }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (_data, key) => {
       toast({ title: `Wallet ${wallet.walletId} resumed` });
       setShowKeyPrompt(false);
-      if (!rememberKey) setAdminKey("");
+      if (rememberKey) {
+        rememberAdminKey(key);
+      } else {
+        clearAdminKey();
+      }
       void qc.invalidateQueries({ queryKey: ["wallets"] });
       void qc.invalidateQueries({ queryKey: ["walletConfig", wallet.walletId] });
     },
@@ -120,7 +124,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
         description: err.message,
         variant: "destructive",
       });
-      setAdminKey("");
+      clearAdminKey();
       setRememberKey(false);
     },
   });
@@ -184,16 +188,28 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
                   Paused due to repeated decision engine rejections. Resume once the underlying issue is resolved.
                 </p>
               </div>
-              {!showKeyPrompt && (
+              {!showKeyPrompt && !resumeMutation.isPending && (
                 <Button
                   size="sm"
                   variant="outline"
                   className="shrink-0 text-xs h-7 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
-                  onClick={() => setShowKeyPrompt(true)}
+                  onClick={() => {
+                    if (adminKey) {
+                      resumeMutation.mutate(adminKey);
+                    } else {
+                      setShowKeyPrompt(true);
+                    }
+                  }}
                 >
                   <Play className="w-3.5 h-3.5" />
                   <span className="ml-1.5">Resume</span>
                 </Button>
+              )}
+              {resumeMutation.isPending && !showKeyPrompt && (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-yellow-400" />
+                  Applying with remembered key…
+                </div>
               )}
             </div>
             {showKeyPrompt && (
@@ -207,7 +223,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
                     onChange={(e) => setAdminKey(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && adminKey) resumeMutation.mutate(adminKey);
-                      if (e.key === "Escape") { setShowKeyPrompt(false); setAdminKey(""); setRememberKey(false); }
+                      if (e.key === "Escape") { setShowKeyPrompt(false); clearAdminKey(); setRememberKey(false); }
                     }}
                     className="h-7 text-xs flex-1"
                     autoFocus
@@ -226,7 +242,7 @@ function WalletCard({ wallet }: { wallet: WalletEntry }) {
                     size="sm"
                     variant="ghost"
                     className="h-7 w-7 p-0"
-                    onClick={() => { setShowKeyPrompt(false); setAdminKey(""); setRememberKey(false); }}
+                    onClick={() => { setShowKeyPrompt(false); clearAdminKey(); setRememberKey(false); }}
                   >
                     <X className="w-3.5 h-3.5" />
                   </Button>

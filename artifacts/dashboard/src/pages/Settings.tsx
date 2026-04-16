@@ -314,7 +314,7 @@ function StrategyPresetCard() {
   const qc = useQueryClient();
   const { data: presetData } = useActivePreset();
   const [pendingPreset, setPendingPreset] = useState<PresetId | null>(null);
-  const [adminKey, setAdminKey] = useAdminKey();
+  const { adminKey, setAdminKey, rememberAdminKey, clearAdminKey } = useAdminKey();
   const [rememberKey, setRememberKey] = useState(() => adminKey.length > 0);
 
   const activePreset = (presetData?.preset ?? "balanced") as PresetId;
@@ -335,15 +335,19 @@ function StrategyPresetCard() {
       }
       return res.json();
     },
-    onSuccess: (_data, { preset }) => {
+    onSuccess: (_data, { preset, key }) => {
       toast({ title: `Strategy preset set to ${preset}` });
       void qc.invalidateQueries({ queryKey: ["activePreset"] });
       setPendingPreset(null);
-      if (!rememberKey) setAdminKey("");
+      if (rememberKey) {
+        rememberAdminKey(key);
+      } else {
+        clearAdminKey();
+      }
     },
     onError: (err: Error) => {
       toast({ title: "Failed to save preset", description: err.message, variant: "destructive" });
-      setAdminKey("");
+      clearAdminKey();
       setRememberKey(false);
     },
   });
@@ -370,7 +374,13 @@ function StrategyPresetCard() {
               <button
                 key={p.id}
                 onClick={() => {
-                  if (!isActive && !pendingPreset) setPendingPreset(p.id);
+                  if (!isActive && !pendingPreset) {
+                    if (adminKey) {
+                      savePreset.mutate({ preset: p.id, key: adminKey });
+                    } else {
+                      setPendingPreset(p.id);
+                    }
+                  }
                 }}
                 disabled={savePreset.isPending || !!pendingPreset}
                 className={cn(
@@ -399,7 +409,15 @@ function StrategyPresetCard() {
           })}
         </div>
 
-        {/* Admin key prompt — shown when a non-active preset is selected */}
+        {/* Auto-applying indicator — shown when cached key fires without a prompt */}
+        {savePreset.isPending && !pendingPreset && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground rounded-lg bg-primary/5 px-3 py-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0 text-primary" />
+            Applying with remembered key…
+          </div>
+        )}
+
+        {/* Admin key prompt — shown when a non-active preset is selected and no key is cached */}
         {pendingPreset && (
           <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 space-y-2">
             <p className="text-xs text-muted-foreground">
@@ -416,7 +434,7 @@ function StrategyPresetCard() {
                 onChange={(e) => setAdminKey(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && adminKey) savePreset.mutate({ preset: pendingPreset, key: adminKey });
-                  if (e.key === "Escape") { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }
+                  if (e.key === "Escape") { setPendingPreset(null); clearAdminKey(); setRememberKey(false); }
                 }}
                 className="h-7 text-xs flex-1"
                 autoFocus
@@ -433,7 +451,7 @@ function StrategyPresetCard() {
                 size="sm"
                 variant="ghost"
                 className="h-7 w-7 p-0"
-                onClick={() => { setPendingPreset(null); setAdminKey(""); setRememberKey(false); }}
+                onClick={() => { setPendingPreset(null); clearAdminKey(); setRememberKey(false); }}
               >
                 <X className="w-3.5 h-3.5" />
               </Button>
