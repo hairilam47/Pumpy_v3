@@ -18,9 +18,16 @@ localPort = 23183
 run = "pnpm --filter @workspace/dashboard run dev"
 
 [services.production]
-build = [ "pnpm", "--filter", "@workspace/dashboard", "run", "build" ]
 publicDir = "artifacts/dashboard/dist/public"
 serve = "static"
+
+[services.production.build]
+args = [ "pnpm", "--filter", "@workspace/dashboard", "run", "build" ]
+
+[services.production.build.env]
+PORT = "23183"
+BASE_PATH = "/dashboard/"
+NODE_ENV = "production"
 
 [[services.production.rewrites]]
 from = "/*"
