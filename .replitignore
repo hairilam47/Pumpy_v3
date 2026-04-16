@@ -25,9 +25,11 @@ rust-engine/target/
 **/*.pyc
 **/*.pyo
 
-# ── Build outputs (regenerated during deployment build) ───────────────────────
-artifacts/dashboard/dist
-artifacts/api-server/dist
+# NOTE: artifacts/api-server/dist is intentionally NOT excluded.
+# The built dist/ must be present in the deployment image for the server to start.
+# artifacts/dashboard/dist is also included since Express serves it statically.
+
+# ── Mockup sandbox build output (dev-only, not deployed) ──────────────────────
 artifacts/mockup-sandbox/dist
 
 # ── Miscellaneous dev-only files ─────────────────────────────────────────────

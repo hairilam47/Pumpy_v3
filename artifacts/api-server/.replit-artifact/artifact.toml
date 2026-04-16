@@ -3,6 +3,7 @@ previewPath = "/api"
 title = "API Server"
 version = "1.0.0"
 id = "3B4_FFSkEVBkAeYMFRJ2e"
+deploymentTarget = "vm"
 
 [[services]]
 localPort = 8080
@@ -14,7 +15,7 @@ run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
 build = "bash scripts/build-production.sh"
-run = "node --enable-source-maps artifacts/api-server/dist/index.mjs"
+run = "pnpm --filter @workspace/api-server run start"
 
 [services.env]
 PORT = "8080"
