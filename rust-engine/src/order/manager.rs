@@ -624,10 +624,9 @@ impl OrderManager {
         // Pre-submission simulation: reject orders likely to fail on-chain before they
         // consume a Jito bundle slot. Simulation failure is not transient so we do not
         // retry — run it once before the submission retry loop.
-        let sim_enabled = database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED")
-            .await
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
+        let sim_enabled = JitoClient::sim_enabled_from_str(
+            database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED").await,
+        );
 
         if sim_enabled {
             // Build a transaction for simulation; replaceRecentBlockhash=true means
@@ -1172,10 +1171,9 @@ impl OrderManagerMinimal {
         // Pre-submission simulation: reject orders likely to fail on-chain before they
         // consume a Jito bundle slot. Simulation failure is not transient so we run
         // it once before the retry loop.
-        let sim_enabled = database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED")
-            .await
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
+        let sim_enabled = JitoClient::sim_enabled_from_str(
+            database::get_config_value(&self.db_pool.pool, "JITO_SIMULATION_ENABLED").await,
+        );
 
         if sim_enabled {
             // Include the tip instruction in the simulation so SOL balance checks are accurate.
