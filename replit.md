@@ -18,7 +18,7 @@ Source: https://github.com/hairilam47/Pumpy_v3
 - Express serves the React dashboard's static build (`artifacts/dashboard/dist/public`) at `/dashboard/`.
 - Express also serves `/api/*` routes and the WebSocket fan-out at `/api/bot/stream`.
 - Bare `/` issues a 301 redirect to `/dashboard/`.
-- The Python strategy engine is spawned as a child process by Express on startup when `NODE_ENV=production`.
+- The Python strategy engine is spawned as a child process by Express on startup when `NODE_ENV=production`. The interpreter defaults to `python3` (the deployment image does not provide a bare `python` symlink) and can be overridden with the `PYTHON_BIN` env var. The "started" log line only fires after the child's `spawn` event so a failed launch is no longer masked by a false success.
 - The Rust gRPC engine remains a separate service and is reached via `RUST_GRPC_URL`.
 - Run command: `pnpm --filter @workspace/api-server run start` (set in Deployments UI). Build command: `bash scripts/build-production.sh`. `deploymentTarget = "vm"` in `artifacts/api-server/.replit-artifact/artifact.toml`.
 

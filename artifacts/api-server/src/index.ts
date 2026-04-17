@@ -245,21 +245,27 @@ httpServer.on("upgrade", (req, socket, head) => {
 // In development each service runs independently via its own workflow.
 if (process.env["NODE_ENV"] === "production") {
   const pythonCwd = path.resolve(process.cwd(), "python-strategy");
-  const py = spawn("python", ["main.py"], {
+  const pythonBin = process.env["PYTHON_BIN"] || "python3";
+  const py = spawn(pythonBin, ["main.py"], {
     cwd: pythonCwd,
     stdio: "inherit",
     env: { ...process.env, PORT: "8001" },
   });
+  py.on("spawn", () => {
+    logger.info(
+      { cwd: pythonCwd, bin: pythonBin, pid: py.pid },
+      "Python strategy engine started",
+    );
+  });
   py.on("error", (err) => {
     logger.warn(
-      { err: err.message },
+      { err: err.message, bin: pythonBin },
       "Python strategy engine failed to start — API continues without it",
     );
   });
   py.on("exit", (code, signal) => {
     logger.warn({ code, signal }, "Python strategy engine exited");
   });
-  logger.info({ cwd: pythonCwd }, "Python strategy engine started");
 }
 
 // Start the singleton gRPC stream once at server boot
