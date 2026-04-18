@@ -1,6 +1,8 @@
 import { createServer } from "http";
 import { spawn } from "child_process";
 import path from "path";
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
 import { EventEmitter } from "events";
 import { WebSocketServer, type WebSocket } from "ws";
 import type * as grpc from "@grpc/grpc-js";
@@ -244,8 +246,39 @@ httpServer.on("upgrade", (req, socket, head) => {
 // so the entire application is served from a single port (8080).
 // In development each service runs independently via its own workflow.
 if (process.env["NODE_ENV"] === "production") {
-  const pythonCwd = path.resolve(process.cwd(), "python-strategy");
-  const pythonBin = process.env["PYTHON_BIN"] || "python3";
+  // The bundle lives at <workspace>/artifacts/api-server/dist/index.mjs in
+  // both prod and dev (pnpm dev runs build then start), so anchoring the
+  // workspace root to the running file's location is stable regardless of
+  // which directory pnpm/Node was launched from.
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const workspaceRoot = path.resolve(moduleDir, "..", "..", "..");
+  const pythonCwd = path.resolve(workspaceRoot, "python-strategy");
+  const venvPython = path.resolve(workspaceRoot, ".pythonlibs", "bin", "python3");
+
+  // Resolution order: explicit override → bundled venv interpreter →
+  // python3 on PATH. Whichever wins is logged so packaging regressions
+  // surface immediately in the first deploy log line.
+  let pythonBin: string;
+  let pythonBinSource: string;
+  if (process.env["PYTHON_BIN"]) {
+    pythonBin = process.env["PYTHON_BIN"];
+    pythonBinSource = "PYTHON_BIN env";
+  } else if (existsSync(venvPython)) {
+    pythonBin = venvPython;
+    pythonBinSource = ".pythonlibs/bin/python3";
+  } else {
+    pythonBin = "python3";
+    pythonBinSource = "PATH";
+  }
+
+  const cwdExists = existsSync(pythonCwd);
+  if (!cwdExists) {
+    logger.warn(
+      { pythonCwd, workspaceRoot, moduleDir },
+      "python-strategy directory not found — engine will fail to spawn",
+    );
+  }
+
   const py = spawn(pythonBin, ["main.py"], {
     cwd: pythonCwd,
     stdio: "inherit",
@@ -253,18 +286,18 @@ if (process.env["NODE_ENV"] === "production") {
   });
   py.on("spawn", () => {
     logger.info(
-      { cwd: pythonCwd, bin: pythonBin, pid: py.pid },
+      { cwd: pythonCwd, bin: pythonBin, binSource: pythonBinSource, pid: py.pid },
       "Python strategy engine started",
     );
   });
   py.on("error", (err) => {
     logger.warn(
-      { err: err.message, bin: pythonBin },
+      { err: err.message, bin: pythonBin, binSource: pythonBinSource, cwd: pythonCwd, cwdExists },
       "Python strategy engine failed to start — API continues without it",
     );
   });
   py.on("exit", (code, signal) => {
-    logger.warn({ code, signal }, "Python strategy engine exited");
+    logger.warn({ code, signal, bin: pythonBin }, "Python strategy engine exited");
   });
 }
 

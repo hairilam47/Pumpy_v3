@@ -9,11 +9,14 @@ rust-engine/target/
 .cache
 .upm
 
-# ── Python package store (~1.1 GB) ────────────────────────────────────────────
-.pythonlibs
-
 # ── Git history (~700 MB) ─────────────────────────────────────────────────────
 .git
+
+# NOTE: .pythonlibs is intentionally NOT excluded.
+# It contains both the wrapped python3 interpreter and the strategy engine's
+# installed dependencies (fastapi, grpcio, scikit-learn, etc.). Without it,
+# the production Express server cannot spawn the Python strategy engine.
+# Bytecode caches inside .pythonlibs are still excluded below.
 
 # ── Node.js dependencies (reinstalled during build) ──────────────────────────
 **/node_modules
