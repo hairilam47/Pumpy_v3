@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool } from "@workspace/db";
 import type { PoolClient } from "pg";
+import { getPythonStatus } from "../lib/python-status";
 
 const router: IRouter = Router();
 
@@ -9,8 +10,8 @@ const CONNECT_TIMEOUT_MS = 3000;
 const QUERY_TIMEOUT_MS = 3000;
 
 router.get("/healthz", (_req, res) => {
-  const data = HealthCheckResponse.parse({ status: "ok" });
-  res.json(data);
+  const base = HealthCheckResponse.parse({ status: "ok" });
+  res.json({ ...base, python: getPythonStatus() });
 });
 
 router.get("/readiness", async (_req: Request, res: Response) => {

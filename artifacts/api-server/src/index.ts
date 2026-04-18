@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { grpcBot, type OrderUpdate } from "./lib/grpc-client";
+import { setPythonStatus } from "./lib/python-status";
 import { db, tradesTable } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -285,14 +286,23 @@ if (process.env["NODE_ENV"] === "production") {
   const binExists = binIsResolvablePath ? existsSync(pythonBin) : null;
   if (binIsResolvablePath && binExists === false) {
     logger.warn(
-      { pythonBin, binSource },
+      { pythonBin, binSource: pythonBinSource },
       "Configured Python interpreter path does not exist — engine will fail to spawn",
     );
   }
   logger.info(
-    { pythonBin, binSource, binExists, pythonCwd, cwdExists, workspaceRoot },
+    { pythonBin, binSource: pythonBinSource, binExists, pythonCwd, cwdExists, workspaceRoot },
     "Python strategy engine resolved paths",
   );
+
+  setPythonStatus({
+    state: "starting",
+    bin: pythonBin,
+    binSource: pythonBinSource,
+    cwd: pythonCwd,
+    cwdExists,
+    binExists,
+  });
 
   const py = spawn(pythonBin, ["main.py"], {
     cwd: pythonCwd,
@@ -304,15 +314,28 @@ if (process.env["NODE_ENV"] === "production") {
       { cwd: pythonCwd, bin: pythonBin, binSource: pythonBinSource, pid: py.pid },
       "Python strategy engine started",
     );
+    setPythonStatus({
+      state: "running",
+      pid: py.pid ?? null,
+      startedAt: new Date().toISOString(),
+    });
   });
   py.on("error", (err) => {
     logger.warn(
       { err: err.message, bin: pythonBin, binSource: pythonBinSource, cwd: pythonCwd, cwdExists },
       "Python strategy engine failed to start — API continues without it",
     );
+    setPythonStatus({ state: "failed", lastError: err.message });
   });
   py.on("exit", (code, signal) => {
     logger.warn({ code, signal, bin: pythonBin }, "Python strategy engine exited");
+    setPythonStatus({
+      state: "exited",
+      exitCode: code,
+      exitSignal: signal,
+      exitedAt: new Date().toISOString(),
+      pid: null,
+    });
   });
 }
 
