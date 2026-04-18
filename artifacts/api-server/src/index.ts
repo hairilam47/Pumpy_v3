@@ -279,6 +279,21 @@ if (process.env["NODE_ENV"] === "production") {
     );
   }
 
+  // Pre-spawn interpreter existence check. We can only stat absolute or
+  // relative paths; bare "python3" must be left to PATH lookup at spawn time.
+  const binIsResolvablePath = path.isAbsolute(pythonBin) || pythonBin.includes("/");
+  const binExists = binIsResolvablePath ? existsSync(pythonBin) : null;
+  if (binIsResolvablePath && binExists === false) {
+    logger.warn(
+      { pythonBin, binSource },
+      "Configured Python interpreter path does not exist — engine will fail to spawn",
+    );
+  }
+  logger.info(
+    { pythonBin, binSource, binExists, pythonCwd, cwdExists, workspaceRoot },
+    "Python strategy engine resolved paths",
+  );
+
   const py = spawn(pythonBin, ["main.py"], {
     cwd: pythonCwd,
     stdio: "inherit",
